@@ -1,2 +1,2 @@
-# m1-infrastructure-setup
+# cloud-architecture-capstone
 Cloud architecture
