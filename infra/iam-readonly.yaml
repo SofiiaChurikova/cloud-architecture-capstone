@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  M1 read-only IAM policy and role.
+
+Parameters:
+  TrustedPrincipalArn:
+    Type: String
+    Description: Who may assume the role
+
+Resources:
+  ReadOnlyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: capstone-readonly
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ViewResourcesOnly
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+              - cloudformation:Describe*
+              - cloudformation:List*
+              - cloudwatch:Describe*
+              - cloudwatch:Get*
+              - cloudwatch:List*
+              - logs:Describe*
+              - s3:ListAllMyBuckets
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource: "*"
+
+  ReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: capstone-readonly
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref TrustedPrincipalArn
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref ReadOnlyPolicy
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt ReadOnlyRole.Arn
