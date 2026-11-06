@@ -1,0 +1,183 @@
+openapi: 3.0.3
+info:
+  title: KV store - coordinator API
+  version: "m2"
+  description: >-
+    Public API of the key-value store (M2). Clients talk only to the coordinator,
+    it sends item requests to the shard chosen by the consistent hashing ring.
+    Shards serve the same item paths, without the table check.
+servers:
+  - url: http://localhost:8080
+
+paths:
+  /tables/{table}:
+    parameters:
+      - $ref: "#/components/parameters/table"
+    put:
+      summary: Create a table
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TableInput"
+      responses:
+        "200":
+          description: Table created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "400":
+          description: Body is not valid
+        "409":
+          description: Table already exists
+    get:
+      summary: Get a table definition
+      responses:
+        "200":
+          description: Table definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Table"
+        "404":
+          description: Table not found
+
+  /tables/{table}/items/{key}:
+    parameters:
+      - $ref: "#/components/parameters/table"
+      - name: key
+        in: path
+        required: true
+        description: Value of the partition key
+        schema:
+          type: string
+    put:
+      summary: CREATE - put an item (overwrites if it exists)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Item"
+      responses:
+        "200":
+          description: Item stored
+        "400":
+          description: Body is not a JSON object
+        "404":
+          description: Table not found
+        "502":
+          description: Shard unavailable
+    get:
+      summary: READ - get an item
+      responses:
+        "200":
+          description: The item
+          headers:
+            X-Shard-Id:
+              description: Which shard served the request (missing in single-node mode)
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          description: Table or item not found
+        "502":
+          description: Shard unavailable
+    head:
+      summary: EXISTS - check if an item exists
+      responses:
+        "200":
+          description: Item exists
+        "404":
+          description: Table or item not found
+        "502":
+          description: Shard unavailable
+    delete:
+      summary: DELETE - delete an item
+      responses:
+        "204":
+          description: Item deleted (or didn't exist)
+        "404":
+          description: Table not found
+        "502":
+          description: Shard unavailable
+
+  /internal/shards:
+    post:
+      summary: Register a shard (called by the shard on start)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Shard"
+      responses:
+        "200":
+          description: Shard added to the ring
+        "400":
+          description: Body is not valid
+    get:
+      summary: List registered shards
+      responses:
+        "200":
+          description: Shards on the ring
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Shard"
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: Service is up
+
+components:
+  parameters:
+    table:
+      name: table
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    TableInput:
+      type: object
+      required: [partition_key]
+      properties:
+        partition_key:
+          type: string
+          example: id
+    Table:
+      type: object
+      properties:
+        name:
+          type: string
+          example: users
+        partition_key:
+          type: string
+          example: id
+    Item:
+      type: object
+      additionalProperties: true
+      example:
+        name: Ann
+        age: 21
+    Shard:
+      type: object
+      required: [id, addr]
+      properties:
+        id:
+          type: string
+          example: shard-1
+        addr:
+          type: string
+          example: http://10.20.16.10:8081

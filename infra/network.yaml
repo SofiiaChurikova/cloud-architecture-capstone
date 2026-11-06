@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: M1 network - VPC with 2 public and 2 private subnets in 2 AZs
+Description: Network - VPC with 2 public and 2 private subnets in 2 AZs, S3 endpoint for the private subnets
 
 Resources:
   Vpc:
@@ -112,6 +112,15 @@ Resources:
     Properties:
       SubnetId: !Ref PrivateSubnetB
       RouteTableId: !Ref PrivateRouteTable
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
 
 Outputs:
   VpcId:
