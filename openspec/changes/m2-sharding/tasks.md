@@ -22,7 +22,7 @@
 
 - [x] 3.1 S3 endpoint in `infra/network.yaml`
 - [x] 3.2 `infra/app.yaml`: coordinator + 2 shards on EC2
-- [ ] 3.3 GitHub Actions pipeline
+- [x] 3.3 GitHub Actions pipeline
 - [x] 3.4 YCSB benchmark, save results to `docs/m2/benchmark.md`
 
 ## 4. Defense
