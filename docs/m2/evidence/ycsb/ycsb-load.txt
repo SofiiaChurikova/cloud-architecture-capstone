@@ -1,0 +1,21 @@
+Using request distribution 'zipfian' a keyrange of [0 10000]
+***************** properties *****************
+"dotransactions"="false"
+"requestdistribution"="zipfian"
+"insertproportion"="0"
+"recordcount"="10000"
+"workload"="core"
+"updateproportion"="0.5"
+"writeallfields"="true"
+"command"="load"
+"kvstore.url"="http://3.80.244.153:8080"
+"operationcount"="50000"
+"readproportion"="0.5"
+"scanproportion"="0"
+"table"="usertable"
+"threadcount"="16"
+**********************************************
+**********************************************
+Run finished, takes 1.396427582s
+INSERT - Takes(s): 1.4, Count: 10000, OPS: 7173.9, Avg(us): 2173, Min(us): 1088, Max(us): 26159, 50th(us): 1772, 90th(us): 2569, 95th(us): 3405, 99th(us): 16159, 99.9th(us): 23135, 99.99th(us): 26127
+TOTAL  - Takes(s): 1.4, Count: 10000, OPS: 7176.3, Avg(us): 2173, Min(us): 1088, Max(us): 26159, 50th(us): 1772, 90th(us): 2569, 95th(us): 3405, 99th(us): 16159, 99.9th(us): 23135, 99.99th(us): 26127

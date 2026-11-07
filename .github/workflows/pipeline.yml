@@ -1,0 +1,68 @@
+name: pipeline
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build binaries
+        run: |
+          mkdir -p out
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o out/coordinator ./cmd/coordinator
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o out/shard ./cmd/shard
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: out/
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: out/
+
+      - name: Upload binaries to S3
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          bucket="capstone-code-$account"
+          aws s3api head-bucket --bucket "$bucket" 2>/dev/null || aws s3 mb "s3://$bucket"
+          aws s3api put-bucket-versioning --bucket "$bucket" --versioning-configuration Status=Enabled
+          aws s3 cp out/coordinator "s3://$bucket/$GITHUB_SHA/coordinator"
+          aws s3 cp out/shard "s3://$bucket/$GITHUB_SHA/shard"
+          {
+            echo "COORDINATOR_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/coordinator" --expires-in 3600)"
+            echo "SHARD_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/shard" --expires-in 3600)"
+          } >> "$GITHUB_ENV"
+
+      - name: Deploy network stack
+        run: |
+          aws cloudformation deploy --stack-name capstone-network \
+            --template-file infra/network.yaml --no-fail-on-empty-changeset
+
+      - name: Recreate app stack
+        run: |
+          aws cloudformation delete-stack --stack-name capstone-app
+          aws cloudformation wait stack-delete-complete --stack-name capstone-app
+          aws cloudformation deploy --stack-name capstone-app --template-file infra/app.yaml \
+            --parameter-overrides "CoordinatorBinaryUrl=$COORDINATOR_URL" "ShardBinaryUrl=$SHARD_URL"
+          aws cloudformation describe-stacks --stack-name capstone-app \
+            --query "Stacks[0].Outputs" --output table

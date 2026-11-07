@@ -1,0 +1,22 @@
+services:
+  coordinator:
+    build: .
+    command: ["coordinator"]
+    ports:
+      - "8080:8080"
+
+  shard1:
+    build: .
+    command: ["shard"]
+    environment:
+      SHARD_ID: shard-1
+      ADVERTISE_ADDR: http://shard1:8081
+      COORDINATOR_URL: http://coordinator:8080
+
+  shard2:
+    build: .
+    command: ["shard"]
+    environment:
+      SHARD_ID: shard-2
+      ADVERTISE_ADDR: http://shard2:8081
+      COORDINATOR_URL: http://coordinator:8080

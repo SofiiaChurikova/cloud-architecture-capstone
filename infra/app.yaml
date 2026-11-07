@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: M2 app - 1 coordinator in a public subnet and 2 shards in the private subnets
+
+Parameters:
+  NetworkStackName:
+    Type: String
+    Default: capstone-network
+  CoordinatorBinaryUrl:
+    Type: String
+    NoEcho: true
+  ShardBinaryUrl:
+    Type: String
+    NoEcho: true
+  ClientCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Who can call the coordinator API (port 8080)
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  CoordinatorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Coordinator - API on 8080
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref ClientCidr
+
+  ShardSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Shards - 8081 only from the coordinator
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8081
+          ToPort: 8081
+          SourceSecurityGroupId: !Ref CoordinatorSecurityGroup
+
+  CoordinatorFromShards:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref CoordinatorSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref ShardSecurityGroup
+
+  Coordinator:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 0
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PublicSubnetIds"
+      SecurityGroupIds:
+        - !Ref CoordinatorSecurityGroup
+      Tags:
+        - Key: Name
+          Value: coordinator
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/coordinator "${CoordinatorBinaryUrl}"
+          chmod +x /usr/local/bin/coordinator
+          cat > /etc/systemd/system/coordinator.service <<EOT
+          [Service]
+          Environment=PORT=8080
+          ExecStart=/usr/local/bin/coordinator
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now coordinator
+
+  Shard1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 0
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      SecurityGroupIds:
+        - !Ref ShardSecurityGroup
+      Tags:
+        - Key: Name
+          Value: shard-1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/shard "${ShardBinaryUrl}"
+          chmod +x /usr/local/bin/shard
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > /etc/systemd/system/shard.service <<EOT
+          [Service]
+          Environment=SHARD_ID=shard-1
+          Environment=ADVERTISE_ADDR=http://$IP:8081
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          ExecStart=/usr/local/bin/shard
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now shard
+
+  Shard2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 1
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      SecurityGroupIds:
+        - !Ref ShardSecurityGroup
+      Tags:
+        - Key: Name
+          Value: shard-2
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/shard "${ShardBinaryUrl}"
+          chmod +x /usr/local/bin/shard
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > /etc/systemd/system/shard.service <<EOT
+          [Service]
+          Environment=SHARD_ID=shard-2
+          Environment=ADVERTISE_ADDR=http://$IP:8081
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          ExecStart=/usr/local/bin/shard
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now shard
+
+Outputs:
+  CoordinatorUrl:
+    Value: !Sub "http://${Coordinator.PublicIp}:8080"
