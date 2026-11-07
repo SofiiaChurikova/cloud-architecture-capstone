@@ -65,3 +65,14 @@ $ curl $URL/internal/shards
 ```
 
 Same result as the local run: key 1 goes to shard-2, key 3 to shard-1, reads go to the same shard as the write.
+
+## Pipeline deploy
+
+PR #1 (milestone2) was merged into main. GitHub Actions run #3: build and deploy are green, deploy took 2m 30s. The app stack was deleted and created again, new CoordinatorUrl is http://3.87.33.206:8080.
+
+```
+$ curl http://3.87.33.206:8080/health
+{"shards":2,"status":"ok"}
+```
+
+Screenshots: `screenshots/06-pipeline-deploy.png`, `screenshots/07-pipeline-outputs.png`.
