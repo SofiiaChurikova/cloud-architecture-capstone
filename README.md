@@ -68,7 +68,7 @@ aws cloudformation describe-stacks --stack-name capstone-app --query 'Stacks[0].
 curl http://<coordinator-ip>:8080/health      # {"shards":2,"status":"ok"}
 ```
 
-Benchmark: `docs/m2/benchmark.md`. Results and configs are also in the versioned bucket `s3://capstone-code-<account>/ycsb/m2/` (TODO: link after the run). Budget: `docs/m2/budget.md`.
+Benchmark: `docs/m2/benchmark.md` (~6000 ops/sec, p99 ~21 ms). Results and configs were also saved to the versioned bucket `s3://capstone-code-590183815018/ycsb/m2/` (sandbox session of 2026-11-07, the sandbox deletes it after the session, so the copy in `docs/m2/evidence/ycsb/` is the main one). Budget: `docs/m2/budget.md`.
 
 ### Delete
 

@@ -20,12 +20,12 @@
 
 ## 3. AWS
 
-- [ ] 3.1 S3 endpoint in `infra/network.yaml`
-- [ ] 3.2 `infra/app.yaml`: coordinator + 2 shards on EC2
+- [x] 3.1 S3 endpoint in `infra/network.yaml`
+- [x] 3.2 `infra/app.yaml`: coordinator + 2 shards on EC2
 - [ ] 3.3 GitHub Actions pipeline
-- [ ] 3.4 YCSB benchmark, save results to `docs/m2/benchmark.md`
+- [x] 3.4 YCSB benchmark, save results to `docs/m2/benchmark.md`
 
 ## 4. Defense
 
-- [ ] 4.1 AI design review
-- [ ] 4.2 README
+- [x] 4.1 AI design review
+- [x] 4.2 README
