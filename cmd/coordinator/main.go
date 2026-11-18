@@ -2,24 +2,42 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/ring"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/store"
 )
 
+const N = 3
+
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	port := env("PORT", "8080")
+	s := newServer()
+	s.W = envInt("W", 2)
+	s.R = envInt("R", 2)
+	if v := os.Getenv("EXPECTED_SHARDS"); v != "" {
+		s.expected = strings.Split(v, ",")
 	}
-	log.Printf("coordinator listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, newServer().routes()))
+	if dir := os.Getenv("DATA_DIR"); dir != "" {
+		if err := s.loadTables(dir); err != nil {
+			log.Fatal(err)
+		}
+	}
+	log.Printf("coordinator listening on :%s, N=%d W=%d R=%d, expected shards %v, %d tables", port, N, s.W, s.R, s.expected, len(s.tables))
+	log.Fatal(http.ListenAndServe(":"+port, s.routes()))
 }
 
 type Table struct {
@@ -27,23 +45,68 @@ type Table struct {
 	PartitionKey string `json:"partition_key"`
 }
 
+type Replica struct {
+	ID      string `json:"id"`
+	Replica string `json:"replica"`
+	Role    string `json:"role"`
+	Addr    string `json:"addr"`
+	Alive   bool   `json:"alive"`
+
+	seen time.Time
+}
+
+type group struct {
+	ID       string    `json:"id"`
+	Replicas []Replica `json:"replicas"`
+}
+
+func (g *group) leader() (Replica, bool) {
+	for _, r := range g.Replicas {
+		if r.Role == "leader" {
+			return r, true
+		}
+	}
+	return Replica{}, false
+}
+
+func (s *server) alive(r Replica) bool {
+	return time.Since(r.seen) < s.deadAfter
+}
+
 type server struct {
+	W, R      int
+	expected  []string
+	deadAfter time.Duration
+	tablesAt  string
+
 	mu     sync.RWMutex
 	tables map[string]Table
+	groups map[string]*group
 
-	ring   *ring.Ring
-	local  *store.Store
-	client *http.Client
+	ring     *ring.Ring
+	local    *store.Store
+	localVer atomic.Uint64
+	next     atomic.Uint64
+	client   *http.Client
 }
 
 func newServer() *server {
 	return &server{
-		tables: map[string]Table{},
-		ring:   ring.New(),
-		local:  store.New(),
+		W:         2,
+		R:         2,
+		deadAfter: 6 * time.Second,
+		tables:    map[string]Table{},
+		groups:    map[string]*group{},
+		ring:      ring.New(),
+		local:     store.New(),
 		client: &http.Client{
-			Timeout:   5 * time.Second,
-			Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 256, IdleConnTimeout: 90 * time.Second},
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				DialContext:         (&net.Dialer{Timeout: 300 * time.Millisecond}).DialContext,
+				MaxIdleConns:        256,
+				MaxIdleConnsPerHost: 256,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 	}
 }
@@ -56,7 +119,14 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /internal/shards", s.registerShard)
 	mux.HandleFunc("GET /internal/shards", s.listShards)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": len(s.ring.Shards())})
+		s.mu.RLock()
+		replicas := 0
+		for _, g := range s.groups {
+			replicas += len(g.Replicas)
+		}
+		shards := len(s.groups)
+		s.mu.RUnlock()
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R})
 	})
 	return mux
 }
@@ -76,7 +146,59 @@ func (s *server) createTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.tables[t.Name] = t
+	if err := s.saveTables(); err != nil {
+		delete(s.tables, t.Name)
+		http.Error(w, "could not save the table: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *server) loadTables(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	s.tablesAt = filepath.Join(dir, "tables.json")
+	b, err := os.ReadFile(s.tablesAt)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, &s.tables)
+}
+
+func (s *server) saveTables() error {
+	if s.tablesAt == "" {
+		return nil
+	}
+	b, err := json.Marshal(s.tables)
+	if err != nil {
+		return err
+	}
+	tmp := s.tablesAt + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.tablesAt)
+}
+
+func (s *server) missingShards() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []string
+	for _, id := range s.expected {
+		g := s.groups[id]
+		if g == nil {
+			out = append(out, id)
+			continue
+		}
+		if _, ok := g.leader(); !ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func (s *server) getTable(w http.ResponseWriter, r *http.Request) {
@@ -95,23 +217,75 @@ func (s *server) table(name string) (Table, bool) {
 	return t, ok
 }
 
+func (s *server) group(id string) group {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	g := s.groups[id]
+	if g == nil {
+		return group{ID: id}
+	}
+	return group{ID: g.ID, Replicas: append([]Replica(nil), g.Replicas...)}
+}
+
 func (s *server) item(w http.ResponseWriter, r *http.Request) {
 	table, key := r.PathValue("table"), r.PathValue("key")
 	if _, ok := s.table(table); !ok {
 		http.Error(w, "table not found", http.StatusNotFound)
 		return
 	}
-
-	shard, ok := s.ring.Get(ring.Key(table, key))
-	if !ok {
-		store.Handler(s.local)(w, r)
+	wq, err1 := quorum(r, "w", s.W)
+	rq, err2 := quorum(r, "r", s.R)
+	if err1 != nil || err2 != nil {
+		http.Error(w, fmt.Sprintf("w and r must be from 1 to %d", N), http.StatusBadRequest)
 		return
 	}
-	s.forward(w, r, shard)
+
+	if missing := s.missingShards(); len(missing) > 0 {
+		http.Error(w, "waiting for shards: "+strings.Join(missing, ", "), http.StatusServiceUnavailable)
+		return
+	}
+	shard, ok := s.ring.Get(ring.Key(table, key))
+	if !ok {
+		s.localItem(w, r, table, key)
+		return
+	}
+	g := s.group(shard.ID)
+	w.Header().Set("X-Shard-Id", g.ID)
+
+	switch r.Method {
+	case http.MethodPut, http.MethodDelete:
+		s.write(w, r, g, wq)
+	case http.MethodGet, http.MethodHead:
+		s.read(w, r, g, rq)
+	default:
+		w.Header().Set("Allow", "PUT, GET, HEAD, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
-func (s *server) forward(w http.ResponseWriter, r *http.Request, shard ring.Shard) {
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, shard.Addr+r.URL.Path, r.Body)
+func quorum(r *http.Request, name string, def int) (int, error) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return def, nil
+	}
+	x, err := strconv.Atoi(v)
+	if err != nil || x < 1 || x > N {
+		return 0, fmt.Errorf("bad %s", name)
+	}
+	return x, nil
+}
+
+func (s *server) write(w http.ResponseWriter, r *http.Request, g group, wq int) {
+	leader, ok := g.leader()
+	if !ok {
+		http.Error(w, "no leader for "+g.ID, http.StatusServiceUnavailable)
+		return
+	}
+	if !s.alive(leader) {
+		http.Error(w, "leader "+leader.Replica+" is down", http.StatusServiceUnavailable)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, itemURL(leader.Addr, r)+fmt.Sprintf("?w=%d", wq), r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -120,35 +294,236 @@ func (s *server) forward(w http.ResponseWriter, r *http.Request, shard ring.Shar
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		http.Error(w, "shard "+shard.ID+" unavailable", http.StatusBadGateway)
+		http.Error(w, "leader "+leader.Replica+" unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
+	w.Header().Set("X-Replicas", leader.Replica)
+	if v := resp.Header.Get("X-Version"); v != "" {
+		w.Header().Set("X-Version", v)
+	}
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
-	w.Header().Set("X-Shard-Id", shard.ID)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
-func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
-	var sh ring.Shard
-	if err := json.NewDecoder(r.Body).Decode(&sh); err != nil || sh.ID == "" || sh.Addr == "" {
-		http.Error(w, `body must be {"id": "...", "addr": "http://..."}`, http.StatusBadRequest)
+type answer struct {
+	replica string
+	status  int
+	version uint64
+	body    []byte
+	err     error
+}
+
+func (s *server) ask(r *http.Request, rep Replica) answer {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, itemURL(rep.Addr, r), nil)
+	if err != nil {
+		return answer{replica: rep.Replica, err: err}
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return answer{replica: rep.Replica, err: err}
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return answer{replica: rep.Replica, err: err}
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return answer{replica: rep.Replica, err: fmt.Errorf("status %d", resp.StatusCode)}
+	}
+	v, _ := strconv.ParseUint(resp.Header.Get("X-Version"), 10, 64)
+	return answer{replica: rep.Replica, status: resp.StatusCode, version: v, body: body}
+}
+
+func itemURL(addr string, r *http.Request) string {
+	return addr + "/internal/items/" + url.PathEscape(r.PathValue("table")) + "/" + url.PathEscape(r.PathValue("key"))
+}
+
+func (s *server) read(w http.ResponseWriter, r *http.Request, g group, rq int) {
+	n := len(g.Replicas)
+	if n < rq {
+		http.Error(w, fmt.Sprintf("%s has %d replicas, r=%d", g.ID, n, rq), http.StatusServiceUnavailable)
 		return
 	}
-	s.ring.Add(sh)
-	writeJSON(w, http.StatusOK, sh)
+	start := int(s.next.Add(1) % uint64(n))
+	order := append(append([]Replica(nil), g.Replicas[start:]...), g.Replicas[:start]...)
+	sort.SliceStable(order, func(i, j int) bool { return s.alive(order[i]) && !s.alive(order[j]) })
+
+	results := make(chan answer, n)
+	launched := 0
+	launch := func() {
+		rep := order[launched]
+		launched++
+		go func() { results <- s.ask(r, rep) }()
+	}
+	for launched < rq {
+		launch()
+	}
+
+	var got []answer
+	pending := rq
+	for pending > 0 && len(got) < rq {
+		a := <-results
+		pending--
+		if a.err != nil {
+			if launched < n {
+				launch()
+				pending++
+			}
+			continue
+		}
+		got = append(got, a)
+	}
+	if len(got) < rq {
+		http.Error(w, fmt.Sprintf("only %d of %d replicas answered", len(got), rq), http.StatusServiceUnavailable)
+		return
+	}
+
+	best := got[0]
+	ids := make([]string, 0, len(got))
+	for _, a := range got {
+		ids = append(ids, a.replica)
+		if a.version > best.version {
+			best = a
+		}
+	}
+	w.Header().Set("X-Replicas", strings.Join(ids, ","))
+	w.Header().Set("X-Version", strconv.FormatUint(best.version, 10))
+
+	if best.status != http.StatusOK {
+		if r.Method == http.MethodGet {
+			http.Error(w, "item not found", http.StatusNotFound)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		w.Write(best.body)
+	}
+}
+
+func (s *server) localItem(w http.ResponseWriter, r *http.Request, table, key string) {
+	switch r.Method {
+	case http.MethodPut, http.MethodDelete:
+		it := store.Item{Version: s.localVer.Add(1), Deleted: r.Method == http.MethodDelete}
+		if !it.Deleted {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if err != nil || !store.IsJSONObject(body) {
+				http.Error(w, "body must be a JSON object", http.StatusBadRequest)
+				return
+			}
+			it.Value = body
+		}
+		s.local.Apply(table, key, it)
+		w.Header().Set("X-Version", strconv.FormatUint(it.Version, 10))
+		if it.Deleted {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+	case http.MethodGet, http.MethodHead:
+		it, ok := s.local.Get(table, key)
+		w.Header().Set("X-Version", strconv.FormatUint(it.Version, 10))
+		if !ok || it.Deleted {
+			if r.Method == http.MethodGet {
+				http.Error(w, "item not found", http.StatusNotFound)
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			w.Write(it.Value)
+		}
+	default:
+		w.Header().Set("Allow", "PUT, GET, HEAD, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
+	var rep Replica
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil || rep.ID == "" || rep.Addr == "" {
+		http.Error(w, `body must be {"id": "shard-1", "replica": "shard-1-a", "role": "leader", "addr": "http://..."}`, http.StatusBadRequest)
+		return
+	}
+	if rep.Replica == "" {
+		rep.Replica = rep.ID
+	}
+	if rep.Role == "" {
+		rep.Role = "leader"
+	}
+	if rep.Role != "leader" && rep.Role != "follower" {
+		http.Error(w, "role must be leader or follower", http.StatusBadRequest)
+		return
+	}
+	rep.Alive = true
+	rep.seen = time.Now()
+
+	s.mu.Lock()
+	g := s.groups[rep.ID]
+	if g == nil {
+		g = &group{ID: rep.ID}
+		s.groups[rep.ID] = g
+	}
+	found := false
+	for i := range g.Replicas {
+		if g.Replicas[i].Replica == rep.Replica {
+			g.Replicas[i] = rep
+			found = true
+		}
+	}
+	if !found {
+		g.Replicas = append(g.Replicas, rep)
+		sort.Slice(g.Replicas, func(i, j int) bool { return g.Replicas[i].Replica < g.Replicas[j].Replica })
+	}
+	s.mu.Unlock()
+
+	s.ring.Add(ring.Shard{ID: rep.ID, Addr: rep.Addr})
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func (s *server) listShards(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.ring.Shards())
+	s.mu.RLock()
+	out := make([]group, 0, len(s.groups))
+	for _, g := range s.groups {
+		reps := append([]Replica(nil), g.Replicas...)
+		for i := range reps {
+			reps[i].Alive = s.alive(reps[i])
+		}
+		out = append(out, group{ID: g.ID, Replicas: reps})
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	writeJSON(w, http.StatusOK, out)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+func env(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
+func envInt(name string, def int) int {
+	v, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || v < 1 || v > N {
+		return def
+	}
+	return v
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/magiconair/properties"
@@ -18,6 +19,7 @@ type creator struct{}
 
 type kvDB struct {
 	url    string
+	query  string
 	client *http.Client
 }
 
@@ -32,6 +34,16 @@ func (creator) Create(p *properties.Properties) (ycsb.DB, error) {
 			Timeout:   5 * time.Second,
 			Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 256, IdleConnTimeout: 90 * time.Second},
 		},
+	}
+	var q []string
+	if w := p.GetString("kvstore.w", ""); w != "" {
+		q = append(q, "w="+w)
+	}
+	if r := p.GetString("kvstore.r", ""); r != "" {
+		q = append(q, "r="+r)
+	}
+	if len(q) > 0 {
+		db.query = "?" + strings.Join(q, "&")
 	}
 	table := p.GetString("table", "usertable")
 	resp, err := db.do(context.Background(), http.MethodPut, db.url+"/tables/"+table, []byte(`{"partition_key":"id"}`))
@@ -51,7 +63,7 @@ func (db *kvDB) InitThread(ctx context.Context, _ int, _ int) context.Context { 
 func (db *kvDB) CleanupThread(_ context.Context) {}
 
 func (db *kvDB) itemURL(table, key string) string {
-	return db.url + "/tables/" + table + "/items/" + key
+	return db.url + "/tables/" + table + "/items/" + key + db.query
 }
 
 func (db *kvDB) Read(ctx context.Context, table, key string, _ []string) (map[string][]byte, error) {

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/store"
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/replica"
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/wal"
 )
 
 func do(t *testing.T, method, url, body string) *http.Response {
@@ -17,13 +20,14 @@ func do(t *testing.T, method, url, body string) *http.Response {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp.Body.Close()
 	return resp
 }
 
 func expect(t *testing.T, resp *http.Response, want int) {
 	t.Helper()
 	if resp.StatusCode != want {
-		t.Fatalf("%s %s: got %d, want %d", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want)
+		t.Fatalf("%s %s: got %d, want %d", resp.Request.Method, resp.Request.URL, resp.StatusCode, want)
 	}
 }
 
@@ -43,40 +47,198 @@ func TestSingleNode(t *testing.T) {
 	expect(t, do(t, "HEAD", c.URL+"/tables/users/items/42", ""), http.StatusNotFound)
 }
 
-func TestWithTwoShards(t *testing.T) {
-	stores := []*store.Store{store.New(), store.New()}
-	var shards []*httptest.Server
-	for _, st := range stores {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/tables/{table}/items/{key}", store.Handler(st))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-		shards = append(shards, srv)
+type cluster struct {
+	srv   *server
+	coord *httptest.Server
+	nodes map[string]*replica.Node
+	urls  map[string]*httptest.Server
+}
+
+func newCluster(t *testing.T, shards []string, follow bool) *cluster {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	srv := newServer()
+	c := &cluster{srv: srv, coord: httptest.NewServer(srv.routes()), nodes: map[string]*replica.Node{}, urls: map[string]*httptest.Server{}}
+	t.Cleanup(c.coord.Close)
+
+	for _, sh := range shards {
+		var leaderURL string
+		for i, suffix := range []string{"a", "b", "c"} {
+			id := sh + "-" + suffix
+			l, _ := wal.Open("")
+			n := replica.New(replica.Config{ID: id, Shard: sh, Leader: i == 0, Log: l})
+			n.AckTimeout = 200 * time.Millisecond
+			mux := http.NewServeMux()
+			n.Routes(mux)
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			c.nodes[id], c.urls[id] = n, srv
+
+			role := "follower"
+			if i == 0 {
+				role, leaderURL = "leader", srv.URL
+			} else if follow {
+				go n.Follow(ctx, leaderURL, http.DefaultClient)
+			}
+			expect(t, do(t, "POST", c.coord.URL+"/internal/shards",
+				fmt.Sprintf(`{"id":"%s","replica":"%s","role":"%s","addr":"%s"}`, sh, id, role, srv.URL)), http.StatusOK)
+		}
+	}
+	expect(t, do(t, "PUT", c.coord.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
+	return c
+}
+
+func TestReplicatedWritesAndReads(t *testing.T) {
+	c := newCluster(t, []string{"shard-1", "shard-2"}, true)
+
+	const n = 100
+	perShard := map[string]int{}
+	for i := 0; i < n; i++ {
+		url := fmt.Sprintf("%s/tables/users/items/user%d", c.coord.URL, i)
+		w := do(t, "PUT", url, `{"v":1}`)
+		expect(t, w, http.StatusOK)
+		perShard[w.Header.Get("X-Shard-Id")]++
+		expect(t, do(t, "GET", url, ""), http.StatusOK)
+		expect(t, do(t, "HEAD", url, ""), http.StatusOK)
+	}
+	if len(perShard) != 2 {
+		t.Fatalf("keys went to %v, want both shards", perShard)
 	}
 
-	c := httptest.NewServer(newServer().routes())
-	defer c.Close()
-	expect(t, do(t, "POST", c.URL+"/internal/shards", `{"id":"shard-1","addr":"`+shards[0].URL+`"}`), http.StatusOK)
-	expect(t, do(t, "POST", c.URL+"/internal/shards", `{"id":"shard-2","addr":"`+shards[1].URL+`"}`), http.StatusOK)
-	expect(t, do(t, "PUT", c.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
+	expect(t, do(t, "DELETE", c.coord.URL+"/tables/users/items/user0?w=3", ""), http.StatusNoContent)
+	for i := 0; i < 3; i++ {
+		expect(t, do(t, "GET", c.coord.URL+"/tables/users/items/user0?r=1", ""), http.StatusNotFound)
+	}
+}
 
-	const n = 200
-	for i := 0; i < n; i++ {
-		key := fmt.Sprintf("user%d", i)
-		expect(t, do(t, "PUT", c.URL+"/tables/users/items/"+key, `{"v":1}`), http.StatusOK)
+func TestReadsAreSpreadOverReplicas(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	url := c.coord.URL + "/tables/users/items/42"
+	expect(t, do(t, "PUT", url+"?w=3", `{"v":1}`), http.StatusOK)
 
-		get := do(t, "GET", c.URL+"/tables/users/items/"+key, "")
-		expect(t, get, http.StatusOK)
-		if get.Header.Get("X-Shard-Id") == "" {
-			t.Fatal("response has no X-Shard-Id")
+	seen := map[string]bool{}
+	for i := 0; i < 6; i++ {
+		resp := do(t, "GET", url+"?r=1", "")
+		expect(t, resp, http.StatusOK)
+		seen[resp.Header.Get("X-Replicas")] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("reads went to %v, want all 3 replicas", seen)
+	}
+}
+
+func TestQuorumReadReturnsNewest(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, false)
+	url := c.coord.URL + "/tables/users/items/42"
+
+	expect(t, do(t, "PUT", url+"?w=1", `{"v":1}`), http.StatusOK)
+
+	stale := 0
+	for i := 0; i < 6; i++ {
+		if do(t, "GET", url+"?r=1", "").StatusCode == http.StatusNotFound {
+			stale++
+		}
+	}
+	if stale == 0 {
+		t.Fatal("with followers behind, some r=1 reads should miss the write")
+	}
+	for i := 0; i < 6; i++ {
+		resp := do(t, "GET", url+"?r=3", "")
+		expect(t, resp, http.StatusOK)
+		if resp.Header.Get("X-Version") != "1" {
+			t.Fatalf("r=3 version %q, want 1", resp.Header.Get("X-Version"))
+		}
+	}
+}
+
+func TestWriteNeedsWReplicas(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, false)
+	url := c.coord.URL + "/tables/users/items/42"
+	expect(t, do(t, "PUT", url+"?w=1", `{"v":1}`), http.StatusOK)
+	expect(t, do(t, "PUT", url+"?w=2", `{"v":2}`), http.StatusServiceUnavailable)
+}
+
+func TestLeaderDown(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	url := c.coord.URL + "/tables/users/items/42"
+	expect(t, do(t, "PUT", url+"?w=3", `{"v":1}`), http.StatusOK)
+
+	c.urls["shard-1-a"].Close()
+	expect(t, do(t, "PUT", url, `{"v":2}`), http.StatusServiceUnavailable)
+	for i := 0; i < 3; i++ {
+		expect(t, do(t, "GET", url+"?r=2", ""), http.StatusOK)
+	}
+}
+
+func TestBadQuorum(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	url := c.coord.URL + "/tables/users/items/42"
+	expect(t, do(t, "PUT", url+"?w=0", `{"v":1}`), http.StatusBadRequest)
+	expect(t, do(t, "GET", url+"?r=4", ""), http.StatusBadRequest)
+}
+
+func TestWaitsForExpectedShards(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	url := c.coord.URL + "/tables/users/items/42"
+
+	c.srv.expected = []string{"shard-1", "shard-2"}
+	expect(t, do(t, "PUT", url, `{"v":1}`), http.StatusServiceUnavailable)
+	expect(t, do(t, "GET", url, ""), http.StatusServiceUnavailable)
+
+	c.srv.expected = []string{"shard-1"}
+	expect(t, do(t, "PUT", url, `{"v":1}`), http.StatusOK)
+}
+
+func TestTablesSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	s1 := newServer()
+	if err := s1.loadTables(dir); err != nil {
+		t.Fatal(err)
+	}
+	c1 := httptest.NewServer(s1.routes())
+	expect(t, do(t, "PUT", c1.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
+	c1.Close()
+
+	s2 := newServer()
+	if err := s2.loadTables(dir); err != nil {
+		t.Fatal(err)
+	}
+	c2 := httptest.NewServer(s2.routes())
+	defer c2.Close()
+	expect(t, do(t, "GET", c2.URL+"/tables/users", ""), http.StatusOK)
+}
+
+func TestKeyIsEscaped(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, false)
+	url := c.coord.URL + "/tables/users/items/x%3Fw%3D1%26"
+
+	expect(t, do(t, "PUT", url+"?w=3", `{"v":1}`), http.StatusServiceUnavailable)
+	if _, ok := c.nodes["shard-1-a"].Store().Get("users", "x?w=1&"); !ok {
+		t.Fatal("the leader stored the key under a different name")
+	}
+}
+
+func TestDeadReplicasAreSkipped(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	c.srv.deadAfter = 200 * time.Millisecond
+	url := c.coord.URL + "/tables/users/items/42"
+	expect(t, do(t, "PUT", url+"?w=3", `{"v":1}`), http.StatusOK)
+
+	time.Sleep(300 * time.Millisecond)
+	for _, id := range []string{"shard-1-a", "shard-1-b"} {
+		expect(t, do(t, "POST", c.coord.URL+"/internal/shards",
+			fmt.Sprintf(`{"id":"shard-1","replica":"%s","role":"%s","addr":"%s"}`, id, map[bool]string{true: "leader", false: "follower"}[id == "shard-1-a"], c.urls[id].URL)), http.StatusOK)
+	}
+	for i := 0; i < 6; i++ {
+		resp := do(t, "GET", url+"?r=2", "")
+		expect(t, resp, http.StatusOK)
+		if strings.Contains(resp.Header.Get("X-Replicas"), "shard-1-c") {
+			t.Fatalf("read asked the dead replica: %s", resp.Header.Get("X-Replicas"))
 		}
 	}
 
-	if got := stores[0].Len() + stores[1].Len(); got != n {
-		t.Fatalf("shards hold %d items, want %d", got, n)
-	}
-	if stores[0].Len() == 0 || stores[1].Len() == 0 {
-		t.Fatalf("one shard is empty: %d / %d", stores[0].Len(), stores[1].Len())
-	}
-	t.Logf("shard-1: %d items, shard-2: %d items", stores[0].Len(), stores[1].Len())
+	time.Sleep(300 * time.Millisecond)
+	expect(t, do(t, "PUT", url, `{"v":2}`), http.StatusServiceUnavailable)
 }

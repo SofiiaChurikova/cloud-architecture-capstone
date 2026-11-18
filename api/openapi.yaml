@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
   title: KV store - coordinator API
-  version: "m2"
+  version: "m3"
   description: >-
-    Public API of the key-value store (M2). Clients talk only to the coordinator,
-    it sends item requests to the shard chosen by the consistent hashing ring.
-    Shards serve the same item paths, without the table check.
+    Public API of the key-value store (M3). Clients talk only to the coordinator.
+    The ring picks the shard, writes go to the leader of the shard,
+    reads ask R replicas of the shard and return the newest version.
 servers:
   - url: http://localhost:8080
 
@@ -55,6 +55,8 @@ paths:
           type: string
     put:
       summary: CREATE - put an item (overwrites if it exists)
+      parameters:
+        - $ref: "#/components/parameters/w"
       requestBody:
         required: true
         content:
@@ -63,69 +65,84 @@ paths:
               $ref: "#/components/schemas/Item"
       responses:
         "200":
-          description: Item stored
+          description: Item stored on W replicas
+          headers:
+            X-Version:
+              $ref: "#/components/headers/X-Version"
         "400":
-          description: Body is not a JSON object
+          description: Body is not a JSON object, or w / r is not 1-3
         "404":
           description: Table not found
-        "502":
-          description: Shard unavailable
+        "503":
+          description: The shards are not registered yet, the leader is down, or fewer than W replicas confirmed (the write can still be in the leader log)
     get:
       summary: READ - get an item
+      parameters:
+        - $ref: "#/components/parameters/r"
       responses:
         "200":
           description: The item
           headers:
             X-Shard-Id:
-              description: Which shard served the request (missing in single-node mode)
+              description: Which shard has the key (missing in single-node mode)
               schema:
                 type: string
+            X-Replicas:
+              description: Which replicas answered, comma separated
+              schema:
+                type: string
+            X-Version:
+              $ref: "#/components/headers/X-Version"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Item"
         "404":
           description: Table or item not found
-        "502":
-          description: Shard unavailable
+        "503":
+          description: The shards are not registered yet, or fewer than R replicas answered
     head:
       summary: EXISTS - check if an item exists
+      parameters:
+        - $ref: "#/components/parameters/r"
       responses:
         "200":
           description: Item exists
         "404":
           description: Table or item not found
-        "502":
-          description: Shard unavailable
+        "503":
+          description: The shards are not registered yet, or fewer than R replicas answered
     delete:
       summary: DELETE - delete an item
+      parameters:
+        - $ref: "#/components/parameters/w"
       responses:
         "204":
           description: Item deleted (or didn't exist)
         "404":
           description: Table not found
-        "502":
-          description: Shard unavailable
+        "503":
+          description: The shards are not registered yet, the leader is down, or fewer than W replicas confirmed (the write can still be in the leader log)
 
   /internal/shards:
     post:
-      summary: Register a shard (called by the shard on start)
+      summary: Register a replica, every replica calls it every 2 s as a heartbeat
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/Shard"
+              $ref: "#/components/schemas/Replica"
       responses:
         "200":
-          description: Shard added to the ring
+          description: Replica added, its shard is on the ring
         "400":
           description: Body is not valid
     get:
-      summary: List registered shards
+      summary: List shards and their replicas
       responses:
         "200":
-          description: Shards on the ring
+          description: Shards on the ring with their replicas
           content:
             application/json:
               schema:
@@ -141,7 +158,30 @@ paths:
           description: Service is up
 
 components:
+  headers:
+    X-Version:
+      description: Version of the item = log offset of its last write in the shard
+      schema:
+        type: integer
   parameters:
+    w:
+      name: w
+      in: query
+      required: false
+      description: How many replicas must have a write before it is committed (default 2)
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 3
+    r:
+      name: r
+      in: query
+      required: false
+      description: How many replicas a read asks (default 2)
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 3
     table:
       name: table
       in: path
@@ -171,13 +211,33 @@ components:
       example:
         name: Ann
         age: 21
-    Shard:
+    Replica:
       type: object
-      required: [id, addr]
+      required: [id, replica, role, addr]
       properties:
         id:
           type: string
           example: shard-1
+        replica:
+          type: string
+          example: shard-1-a
+        role:
+          type: string
+          enum: [leader, follower]
         addr:
           type: string
           example: http://10.20.16.10:8081
+        alive:
+          type: boolean
+          readOnly: true
+          description: false if the replica sent no heartbeat for 6 s
+    Shard:
+      type: object
+      properties:
+        id:
+          type: string
+          example: shard-1
+        replicas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Replica"
