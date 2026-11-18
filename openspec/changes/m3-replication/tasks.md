@@ -21,8 +21,8 @@
 ## 3. AWS
 
 - [x] 3.1 `infra/app.yaml`: 7 instances
-- [ ] 3.2 Demo in AWS: stop a follower, write, start it, read
-- [ ] 3.3 YCSB for W=1/2/3, `docs/m3/benchmark.md`
+- [x] 3.2 Demo in AWS: stop a follower, write, start it, read
+- [x] 3.3 YCSB for W=1/2/3, `docs/m3/benchmark.md`
 
 ## 4. Defense
 
