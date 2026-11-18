@@ -1,0 +1,261 @@
+package replica
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/store"
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/wal"
+)
+
+type Config struct {
+	ID     string
+	Shard  string
+	Leader bool
+	Log    *wal.Log
+}
+
+type Node struct {
+	cfg   Config
+	store *store.Store
+
+	mu    sync.Mutex
+	acked map[string]uint64
+	ackCh chan struct{}
+
+	AckTimeout time.Duration
+	PollWait   time.Duration
+}
+
+func New(cfg Config) *Node {
+	n := &Node{
+		cfg:        cfg,
+		store:      store.New(),
+		acked:      map[string]uint64{},
+		ackCh:      make(chan struct{}),
+		AckTimeout: 2 * time.Second,
+		PollWait:   time.Second,
+	}
+	for _, e := range cfg.Log.From(1, 0) {
+		n.apply(e)
+	}
+	return n
+}
+
+func (n *Node) Store() *store.Store { return n.store }
+
+func (n *Node) apply(e wal.Entry) {
+	n.store.Apply(e.Table, e.Key, store.Item{Value: e.Value, Version: e.Offset, Deleted: e.Deleted})
+}
+
+func (n *Node) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("/internal/items/{table}/{key}", n.item)
+	mux.HandleFunc("GET /internal/log", n.serveLog)
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		role := "follower"
+		if n.cfg.Leader {
+			role = "leader"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"replica": n.cfg.ID, "shard": n.cfg.Shard, "role": role,
+			"offset": n.cfg.Log.Last(), "items": n.store.Len(),
+		})
+	})
+}
+
+func (n *Node) item(w http.ResponseWriter, r *http.Request) {
+	table, key := r.PathValue("table"), r.PathValue("key")
+	w.Header().Set("X-Replica-Id", n.cfg.ID)
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		it, ok := n.store.Get(table, key)
+		w.Header().Set("X-Version", strconv.FormatUint(it.Version, 10))
+		if !ok || it.Deleted {
+			if it.Deleted {
+				w.Header().Set("X-Deleted", "true")
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			w.Write(it.Value)
+		}
+
+	case http.MethodPut, http.MethodDelete:
+		if !n.cfg.Leader {
+			http.Error(w, "not the leader", http.StatusConflict)
+			return
+		}
+		need := 1
+		if v := r.URL.Query().Get("w"); v != "" {
+			x, err := strconv.Atoi(v)
+			if err != nil || x < 1 {
+				http.Error(w, "w must be a number from 1", http.StatusBadRequest)
+				return
+			}
+			need = x
+		}
+		e := wal.Entry{Table: table, Key: key, Deleted: r.Method == http.MethodDelete}
+		if !e.Deleted {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if err != nil || !store.IsJSONObject(body) {
+				http.Error(w, "body must be a JSON object", http.StatusBadRequest)
+				return
+			}
+			e.Value = body
+		}
+		e, err := n.cfg.Log.Append(e)
+		if err != nil {
+			http.Error(w, "log write failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		n.apply(e)
+		w.Header().Set("X-Version", strconv.FormatUint(e.Offset, 10))
+
+		if got := n.waitAcks(r.Context(), e.Offset, need); got < need {
+			http.Error(w, fmt.Sprintf("only %d of %d replicas confirmed", got, need), http.StatusServiceUnavailable)
+			return
+		}
+		if e.Deleted {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+
+	default:
+		w.Header().Set("Allow", "PUT, GET, HEAD, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (n *Node) count(offset uint64) int {
+	c := 1
+	for _, a := range n.acked {
+		if a >= offset {
+			c++
+		}
+	}
+	return c
+}
+
+func (n *Node) waitAcks(ctx context.Context, offset uint64, need int) int {
+	ctx, cancel := context.WithTimeout(ctx, n.AckTimeout)
+	defer cancel()
+	for {
+		n.mu.Lock()
+		c, ch := n.count(offset), n.ackCh
+		n.mu.Unlock()
+		if c >= need {
+			return c
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return c
+		}
+	}
+}
+
+func (n *Node) setAck(replica string, offset uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if offset > n.acked[replica] {
+		n.acked[replica] = offset
+		close(n.ackCh)
+		n.ackCh = make(chan struct{})
+	}
+}
+
+func (n *Node) serveLog(w http.ResponseWriter, r *http.Request) {
+	if !n.cfg.Leader {
+		http.Error(w, "not the leader", http.StatusConflict)
+		return
+	}
+	from, err := strconv.ParseUint(r.URL.Query().Get("from"), 10, 64)
+	if err != nil || from < 1 {
+		http.Error(w, "from must be a number from 1", http.StatusBadRequest)
+		return
+	}
+	if f := r.URL.Query().Get("replica"); f != "" {
+		n.setAck(f, from-1)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), n.PollWait)
+	defer cancel()
+	n.cfg.Log.Wait(ctx, from)
+
+	entries := n.cfg.Log.From(from, 500)
+	if entries == nil {
+		entries = []wal.Entry{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries)
+}
+
+func (n *Node) Follow(ctx context.Context, leader string, client *http.Client) {
+	log.Printf("%s: resync from offset %d", n.cfg.ID, n.cfg.Log.Last()+1)
+	for ctx.Err() == nil {
+		from := n.cfg.Log.Last() + 1
+		entries, err := n.pull(ctx, leader, from, client)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("%s: pull from %d failed: %v", n.cfg.ID, from, err)
+				sleep(ctx, time.Second)
+			}
+			continue
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		if err := n.cfg.Log.AppendAt(entries); err != nil {
+			log.Printf("%s: %v", n.cfg.ID, err)
+			if !errors.Is(err, wal.ErrGap) {
+				sleep(ctx, time.Second)
+			}
+			continue
+		}
+		for _, e := range entries {
+			n.apply(e)
+		}
+	}
+}
+
+func (n *Node) pull(ctx context.Context, leader string, from uint64, client *http.Client) ([]wal.Entry, error) {
+	url := fmt.Sprintf("%s/internal/log?from=%d&replica=%s", leader, from, n.cfg.ID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("leader answered %s", resp.Status)
+	}
+	var entries []wal.Entry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
+	}
+}

@@ -1,22 +1,31 @@
+x-node: &node
+  build: .
+  command: ["shard"]
+
 services:
   coordinator:
     build: .
     command: ["coordinator"]
+    environment: {EXPECTED_SHARDS: "shard-1,shard-2", DATA_DIR: /data}
     ports:
       - "8080:8080"
 
-  shard1:
-    build: .
-    command: ["shard"]
-    environment:
-      SHARD_ID: shard-1
-      ADVERTISE_ADDR: http://shard1:8081
-      COORDINATOR_URL: http://coordinator:8080
+  shard-1-a:
+    <<: *node
+    environment: {SHARD_ID: shard-1, REPLICA_ID: shard-1-a, ROLE: leader, DATA_DIR: /data, ADVERTISE_ADDR: "http://shard-1-a:8081", COORDINATOR_URL: "http://coordinator:8080"}
+  shard-1-b:
+    <<: *node
+    environment: {SHARD_ID: shard-1, REPLICA_ID: shard-1-b, ROLE: follower, LEADER_URL: "http://shard-1-a:8081", DATA_DIR: /data, ADVERTISE_ADDR: "http://shard-1-b:8081", COORDINATOR_URL: "http://coordinator:8080"}
+  shard-1-c:
+    <<: *node
+    environment: {SHARD_ID: shard-1, REPLICA_ID: shard-1-c, ROLE: follower, LEADER_URL: "http://shard-1-a:8081", DATA_DIR: /data, ADVERTISE_ADDR: "http://shard-1-c:8081", COORDINATOR_URL: "http://coordinator:8080"}
 
-  shard2:
-    build: .
-    command: ["shard"]
-    environment:
-      SHARD_ID: shard-2
-      ADVERTISE_ADDR: http://shard2:8081
-      COORDINATOR_URL: http://coordinator:8080
+  shard-2-a:
+    <<: *node
+    environment: {SHARD_ID: shard-2, REPLICA_ID: shard-2-a, ROLE: leader, DATA_DIR: /data, ADVERTISE_ADDR: "http://shard-2-a:8081", COORDINATOR_URL: "http://coordinator:8080"}
+  shard-2-b:
+    <<: *node
+    environment: {SHARD_ID: shard-2, REPLICA_ID: shard-2-b, ROLE: follower, LEADER_URL: "http://shard-2-a:8081", DATA_DIR: /data, ADVERTISE_ADDR: "http://shard-2-b:8081", COORDINATOR_URL: "http://coordinator:8080"}
+  shard-2-c:
+    <<: *node
+    environment: {SHARD_ID: shard-2, REPLICA_ID: shard-2-c, ROLE: follower, LEADER_URL: "http://shard-2-a:8081", DATA_DIR: /data, ADVERTISE_ADDR: "http://shard-2-c:8081", COORDINATOR_URL: "http://coordinator:8080"}

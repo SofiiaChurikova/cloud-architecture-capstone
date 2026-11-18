@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: M2 app - 1 coordinator in a public subnet and 2 shards in the private subnets
+Description: M3 app - 1 coordinator in a public subnet, 2 shards x 3 replicas in the private subnets
 
 Parameters:
   NetworkStackName:
@@ -19,6 +19,16 @@ Parameters:
     Type: String
     Default: t3.micro
     AllowedValues: [t3.micro, t3.small]
+  WriteQuorum:
+    Type: Number
+    Default: 2
+    AllowedValues: [1, 2, 3]
+    Description: Default W, how many replicas must have a write
+  ReadQuorum:
+    Type: Number
+    Default: 2
+    AllowedValues: [1, 2, 3]
+    Description: Default R, how many replicas a read asks
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
@@ -39,7 +49,7 @@ Resources:
   ShardSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Shards - 8081 only from the coordinator
+      GroupDescription: Shard replicas - 8081 only from the coordinator and other replicas
       VpcId:
         Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
       SecurityGroupIngress:
@@ -47,6 +57,15 @@ Resources:
           FromPort: 8081
           ToPort: 8081
           SourceSecurityGroupId: !Ref CoordinatorSecurityGroup
+
+  ShardFromShards:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ShardSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8081
+      ToPort: 8081
+      SourceSecurityGroupId: !Ref ShardSecurityGroup
 
   CoordinatorFromShards:
     Type: AWS::EC2::SecurityGroupIngress
@@ -86,6 +105,10 @@ Resources:
           cat > /etc/systemd/system/coordinator.service <<EOT
           [Service]
           Environment=PORT=8080
+          Environment=W=${WriteQuorum}
+          Environment=R=${ReadQuorum}
+          Environment=EXPECTED_SHARDS=shard-1,shard-2
+          Environment=DATA_DIR=/var/lib/kvcoord
           ExecStart=/usr/local/bin/coordinator
           Restart=always
           [Install]
@@ -93,7 +116,7 @@ Resources:
           EOT
           systemctl enable --now coordinator
 
-  Shard1:
+  Shard1A:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref AmiId
@@ -112,7 +135,7 @@ Resources:
         - !Ref ShardSecurityGroup
       Tags:
         - Key: Name
-          Value: shard-1
+          Value: shard-1-a
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -124,6 +147,9 @@ Resources:
           cat > /etc/systemd/system/shard.service <<EOT
           [Service]
           Environment=SHARD_ID=shard-1
+          Environment=REPLICA_ID=shard-1-a
+          Environment=ROLE=leader
+          Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
           Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
           ExecStart=/usr/local/bin/shard
@@ -133,7 +159,7 @@ Resources:
           EOT
           systemctl enable --now shard
 
-  Shard2:
+  Shard1B:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref AmiId
@@ -152,7 +178,95 @@ Resources:
         - !Ref ShardSecurityGroup
       Tags:
         - Key: Name
-          Value: shard-2
+          Value: shard-1-b
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/shard "${ShardBinaryUrl}"
+          chmod +x /usr/local/bin/shard
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > /etc/systemd/system/shard.service <<EOT
+          [Service]
+          Environment=SHARD_ID=shard-1
+          Environment=REPLICA_ID=shard-1-b
+          Environment=ROLE=follower
+          Environment=LEADER_URL=http://${Shard1A.PrivateIp}:8081
+          Environment=DATA_DIR=/var/lib/kvnode
+          Environment=ADVERTISE_ADDR=http://$IP:8081
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          ExecStart=/usr/local/bin/shard
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now shard
+
+  Shard1C:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 0
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      SecurityGroupIds:
+        - !Ref ShardSecurityGroup
+      Tags:
+        - Key: Name
+          Value: shard-1-c
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/shard "${ShardBinaryUrl}"
+          chmod +x /usr/local/bin/shard
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > /etc/systemd/system/shard.service <<EOT
+          [Service]
+          Environment=SHARD_ID=shard-1
+          Environment=REPLICA_ID=shard-1-c
+          Environment=ROLE=follower
+          Environment=LEADER_URL=http://${Shard1A.PrivateIp}:8081
+          Environment=DATA_DIR=/var/lib/kvnode
+          Environment=ADVERTISE_ADDR=http://$IP:8081
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          ExecStart=/usr/local/bin/shard
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now shard
+
+  Shard2A:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 1
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      SecurityGroupIds:
+        - !Ref ShardSecurityGroup
+      Tags:
+        - Key: Name
+          Value: shard-2-a
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
@@ -164,6 +278,97 @@ Resources:
           cat > /etc/systemd/system/shard.service <<EOT
           [Service]
           Environment=SHARD_ID=shard-2
+          Environment=REPLICA_ID=shard-2-a
+          Environment=ROLE=leader
+          Environment=DATA_DIR=/var/lib/kvnode
+          Environment=ADVERTISE_ADDR=http://$IP:8081
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          ExecStart=/usr/local/bin/shard
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now shard
+
+  Shard2B:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 0
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      SecurityGroupIds:
+        - !Ref ShardSecurityGroup
+      Tags:
+        - Key: Name
+          Value: shard-2-b
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/shard "${ShardBinaryUrl}"
+          chmod +x /usr/local/bin/shard
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > /etc/systemd/system/shard.service <<EOT
+          [Service]
+          Environment=SHARD_ID=shard-2
+          Environment=REPLICA_ID=shard-2-b
+          Environment=ROLE=follower
+          Environment=LEADER_URL=http://${Shard2A.PrivateIp}:8081
+          Environment=DATA_DIR=/var/lib/kvnode
+          Environment=ADVERTISE_ADDR=http://$IP:8081
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          ExecStart=/usr/local/bin/shard
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now shard
+
+  Shard2C:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 1
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      SecurityGroupIds:
+        - !Ref ShardSecurityGroup
+      Tags:
+        - Key: Name
+          Value: shard-2-c
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          curl -fsSL -o /usr/local/bin/shard "${ShardBinaryUrl}"
+          chmod +x /usr/local/bin/shard
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > /etc/systemd/system/shard.service <<EOT
+          [Service]
+          Environment=SHARD_ID=shard-2
+          Environment=REPLICA_ID=shard-2-c
+          Environment=ROLE=follower
+          Environment=LEADER_URL=http://${Shard2A.PrivateIp}:8081
+          Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
           Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
           ExecStart=/usr/local/bin/shard

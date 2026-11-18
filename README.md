@@ -5,32 +5,79 @@ Capstone for the Cloud Architectures course: a small DynamoDB-like key-value sto
 | Milestone | Status |
 |---|---|
 | M1 - Infrastructure setup | done |
-| **M2 - Sharding** | done |
-| M3 - Replication | - |
+| M2 - Sharding | done |
+| **M3 - Replication** | in progress |
 | M4 - Monitoring, failures, MCP | - |
 | M5 - Production | - |
 
 ## What's where
 
 ```
-openspec/changes/m2-sharding/      M2 proposal, specs, tasks (written before the code)
+openspec/changes/m3-replication/   M3 proposal, specs, tasks (written before the code)
+openspec/changes/m2-sharding/      M2 change
 openspec/changes/archive/          M1 change, archived
 openspec/specs/                    current specs
-docs/adr/                          architecture decisions (0001-0003 M1, 0004-0009 M2)
+docs/adr/                          architecture decisions (0001-0003 M1, 0004-0009 M2, 0010-0014 M3)
 api/openapi.yaml                   the API
-cmd/coordinator/                   coordinator: tables, ring, sends items to shards
-cmd/shard/                         shard: in-memory items, registers in the coordinator
+cmd/coordinator/                   coordinator: tables, ring, replica sets, quorum reads
+cmd/shard/                         one replica: leader or follower of a shard
 internal/ring/                     consistent hashing ring (xxHash64, 128 vnodes)
-internal/store/                    in-memory store + HTTP handler for items
+internal/wal/                      append-only log on disk (offsets, replay on start)
+internal/replica/                  leader (log + wait for W) and follower (pull from offset)
+internal/store/                    in-memory items with versions
 infra/network.yaml                 VPC stack (M1) + S3 endpoint (M2)
-infra/app.yaml                     coordinator + 2 shards on EC2
+infra/app.yaml                     coordinator + 2 shards x 3 replicas on EC2
 infra/iam-readonly.yaml            read-only policy (M1, only validated)
 .github/workflows/pipeline.yml     build + deploy
 bench/                             YCSB binding and workload
-docs/m1/, docs/m2/                 reports, evidence, AI reviews
+docs/m1/, docs/m2/, docs/m3/       reports, evidence, AI reviews
 ```
 
+## How to run M3
+
+### Locally
+
+Needs Go 1.22 (or Docker).
+
+```bash
+go test ./...
+docker compose up --build        # coordinator + shard-1-a/b/c + shard-2-a/b/c
+
+curl localhost:8080/health                    # "shards":2,"replicas":6
+curl localhost:8080/internal/shards           # every shard with its leader and 2 followers, alive true/false
+curl -X PUT localhost:8080/tables/users -d '{"partition_key":"id"}'
+curl -i -X PUT localhost:8080/tables/users/items/42 -d '{"id":"42"}'       # w=2 by default
+curl -i "localhost:8080/tables/users/items/42?r=1"                         # run a few times: X-Replicas changes
+curl -i "localhost:8080/tables/users/items/42?r=3"                         # asks all 3 replicas
+```
+
+Headers in the answer: `X-Shard-Id` (shard), `X-Replicas` (which replicas answered), `X-Version` (log offset of the last write).
+
+Stop a follower and start it again:
+
+```bash
+docker compose stop shard-1-b
+curl -i -X PUT "localhost:8080/tables/users/items/42?w=3" -d '{"id":"42","v":2}'   # 503, only 2 replicas
+curl -i -X PUT localhost:8080/tables/users/items/42 -d '{"id":"42","v":3}'          # 200 with w=2
+docker compose start shard-1-b
+docker compose logs shard-1-b | grep resync                                        # continues from its offset
+```
+
+Output of my run: `docs/m3/evidence/local-run.md`.
+
+### In AWS
+
+Same as M2: new credentials in the repo secrets, push to `main`, the pipeline recreates `capstone-app`, now with 7 instances.
+
+```bash
+curl http://<coordinator-ip>:8080/health      # "shards":2,"replicas":6
+```
+
+Benchmark: `docs/m3/benchmark.md`. Budget: `docs/m3/budget.md`.
+
 ## How to run M2
+
+M2 is the same commands with 2 single shards, see the `m2` tag.
 
 ### Locally
 
@@ -134,14 +181,16 @@ Reports: [permissions](docs/m1/labrole.md), [quotas](docs/m1/quotas.md), [budget
 
 ## What changed since the last milestone
 
-- The store itself: REST API (ADR-0004), coordinator and 2 shards in Go, all in memory.
-- Consistent hashing ring: xxHash64 with 128 virtual nodes per shard (ADR-0005), the key is `table#partition_key` (ADR-0006).
-- Network: private subnets now have a route to S3 through a free gateway endpoint, so shards can download the code without internet (ADR-0007). The M1 network spec is updated for this.
-- App stack `infra/app.yaml`: coordinator in a public subnet, shards in the private ones, shards are reachable only from the coordinator.
-- CI/CD with GitHub Actions, because CodePipeline is not in the sandbox (ADR-0008).
-- Coordinator metadata (tables, ring) is kept in memory (ADR-0009).
-- YCSB baseline in `docs/m2/benchmark.md`, to compare in M3 and M5.
+- Every shard is a replica set now: 1 leader + 2 followers, 7 instances in total (ADR-0013).
+- The leader appends every write to an append-only log on disk, followers pull it from their offset and resync after a restart (ADR-0011, ADR-0012).
+- Every item has a version (the log offset), deletes are tombstones.
+- Quorum writes and reads with N=3, default W=2 and R=2, changeable per request with `?w=` / `?r=` (ADR-0010).
+- Reads are spread over all 3 replicas of a shard.
+- Replicas can reach each other on 8081 (followers pull from the leader).
+- Replicas send a heartbeat every 2 s. A replica without one for 6 s is down: reads skip it, a write to a dead leader gets `503` at once (ADR-0014).
+- The coordinator keeps tables in `$DATA_DIR/tables.json` and waits for all shards from `EXPECTED_SHARDS` before it takes requests (ADR-0014).
+- YCSB for different W / R against the M2 baseline in `docs/m3/benchmark.md`.
 
 ## AI usage
 
-The spec and ADRs were written before the code. AI helped with explanations and drafts, and a separate AI reviewed the design - the reviews and my decisions are in `docs/m1/ai-review.md` and `docs/m2/ai-review.md`.
+The spec and ADRs were written before the code. AI helped with explanations and drafts, and a separate AI reviewed the design - the reviews and my decisions are in `docs/m1/ai-review.md`, `docs/m2/ai-review.md` and `docs/m3/ai-review.md`.
