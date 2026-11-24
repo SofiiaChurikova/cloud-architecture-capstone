@@ -10,7 +10,7 @@ After M3 the store is replicated, but I can't see what happens inside it: how sl
 - Every request gets a trace ID (`X-Trace-Id`). The coordinator passes it to the replicas, and all services log in JSON with this ID
 - Prometheus + Grafana on one more EC2 (8 of 9). The dashboard and the alert rules are files in the repo. Alerts: node down, high p99, replication lag
 - The version of an item is a leader timestamp instead of the log offset. Replicas and reads keep the newest version (last write wins)
-- The coordinator can require a token for the API (`API_TOKEN`)
+- The coordinator can require a token for the API (`API_TOKEN`), and `/internal/*` moves to a port that only the cluster can reach (after the AI review)
 - A new program `cmd/mcp`: an MCP server over stdio with tools for EXISTS / CREATE / READ / DELETE that calls the coordinator API
 
 ## Capabilities

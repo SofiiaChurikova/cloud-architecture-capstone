@@ -17,6 +17,7 @@
 - [x] 2.6 `cmd/mcp`: tools, schemas, errors
 - [x] 2.7 `monitoring/`: Prometheus config, alert rules, Grafana dashboard
 - [x] 2.8 Tests + local run (binaries + Prometheus + official MCP client)
+- [x] 2.9 After the AI review: internal port 9080 (ADR-0019), ack checks on the leader, 5xx out of the latency histogram, error-rate alert, log fields, MCP create-only + delete limit + annotations
 
 ## 3. AWS
 
@@ -27,5 +28,5 @@
 ## 4. Defense
 
 - [x] 4.1 Budget for M4
-- [ ] 4.2 AI design review
+- [x] 4.2 AI design review
 - [x] 4.3 README

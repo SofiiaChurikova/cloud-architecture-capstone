@@ -11,14 +11,27 @@ groups:
 
       - alert: ShardMissingReplicas
         expr: kv_replicas_alive < 3
-        for: 30s
+        for: 15s
         labels:
           severity: critical
         annotations:
           summary: "{{ $labels.shard }} has {{ $value }} of 3 replicas alive"
 
+      - alert: HighErrorRate
+        expr: |
+          (sum(rate(kv_requests_total{job="coordinator", status=~"5.."}[5m])) or vector(0))
+            / sum(rate(kv_requests_total{job="coordinator"}[5m])) > 0.005
+          and sum(rate(kv_requests_total{job="coordinator"}[5m])) > 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of requests got 5xx, SLO allows 0.5%"
+
       - alert: HighReadLatency
-        expr: histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op="read"}[1m]))) > 0.02
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op="read"}[5m]))) > 0.02
+          and sum(rate(kv_request_duration_seconds_count{job="coordinator", op="read"}[5m])) > 1
         for: 2m
         labels:
           severity: warning
@@ -26,7 +39,9 @@ groups:
           summary: "read p99 is {{ $value | humanizeDuration }}, SLO is 20ms"
 
       - alert: HighWriteLatency
-        expr: histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op=~"write|delete"}[1m]))) > 0.1
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op=~"write|delete"}[5m]))) > 0.1
+          and sum(rate(kv_request_duration_seconds_count{job="coordinator", op=~"write|delete"}[5m])) > 1
         for: 2m
         labels:
           severity: warning

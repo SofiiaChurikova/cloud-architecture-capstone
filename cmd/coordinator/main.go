@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ const N = 3
 
 func main() {
 	port := env("PORT", "8080")
+	internalPort := env("INTERNAL_PORT", "9080")
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "coordinator"))
 	s := newServer()
 	s.token = os.Getenv("API_TOKEN")
@@ -42,6 +44,7 @@ func main() {
 		}
 	}
 	log.Printf("coordinator listening on :%s, N=%d W=%d R=%d, expected shards %v, %d tables, token required: %v", port, N, s.W, s.R, s.expected, len(s.tables), s.token != "")
+	go func() { log.Fatal(http.ListenAndServe(":"+internalPort, s.internalRoutes())) }()
 	log.Fatal(http.ListenAndServe(":"+port, s.routes()))
 }
 
@@ -130,21 +133,29 @@ func (s *server) routes() http.Handler {
 	mux.Handle("PUT /tables/{table}", s.auth(s.createTable))
 	mux.Handle("GET /tables/{table}", s.auth(s.getTable))
 	mux.Handle("/tables/{table}/items/{key}", s.auth(s.item))
+	mux.HandleFunc("GET /health", s.health)
+	return s.metrics.Wrap(mux)
+}
+
+func (s *server) internalRoutes() http.Handler {
+	mux := http.NewServeMux()
 	mux.HandleFunc("POST /internal/shards", s.registerShard)
 	mux.HandleFunc("GET /internal/shards", s.listShards)
 	mux.HandleFunc("GET /internal/targets", s.targets)
 	mux.Handle("GET /metrics", s.reg)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.RLock()
-		replicas := 0
-		for _, g := range s.groups {
-			replicas += len(g.Replicas)
-		}
-		shards := len(s.groups)
-		s.mu.RUnlock()
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R})
-	})
-	return s.metrics.Wrap(mux)
+	mux.HandleFunc("GET /health", s.health)
+	return mux
+}
+
+func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	replicas := 0
+	for _, g := range s.groups {
+		replicas += len(g.Replicas)
+	}
+	shards := len(s.groups)
+	s.mu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R})
 }
 
 func (s *server) auth(next http.HandlerFunc) http.Handler {
@@ -534,12 +545,16 @@ func (s *server) localItem(w http.ResponseWriter, r *http.Request, table, key st
 
 func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 	var rep Replica
-	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil || rep.ID == "" || rep.Addr == "" {
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil || !validID.MatchString(rep.ID) || !validAddr(rep.Addr) {
 		http.Error(w, `body must be {"id": "shard-1", "replica": "shard-1-a", "role": "leader", "addr": "http://..."}`, http.StatusBadRequest)
 		return
 	}
 	if rep.Replica == "" {
 		rep.Replica = rep.ID
+	}
+	if !validID.MatchString(rep.Replica) {
+		http.Error(w, "replica must match "+validID.String(), http.StatusBadRequest)
+		return
 	}
 	if rep.Role == "" {
 		rep.Role = "leader"
@@ -572,6 +587,13 @@ func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 
 	s.ring.Add(ring.Shard{ID: rep.ID, Addr: rep.Addr})
 	writeJSON(w, http.StatusOK, rep)
+}
+
+var validID = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+func validAddr(addr string) bool {
+	u, err := url.Parse(addr)
+	return err == nil && u.Scheme == "http" && u.Host != "" && (u.Path == "" || u.Path == "/")
 }
 
 func (s *server) listShards(w http.ResponseWriter, r *http.Request) {

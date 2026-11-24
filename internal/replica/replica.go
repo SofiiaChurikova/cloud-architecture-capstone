@@ -173,8 +173,9 @@ func (n *Node) waitAcks(ctx context.Context, offset uint64, need int) int {
 func (n *Node) setAck(replica string, offset uint64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if offset > n.acked[replica] {
-		n.acked[replica] = offset
+	old, ok := n.acked[replica]
+	n.acked[replica] = offset
+	if !ok || offset > old {
 		close(n.ackCh)
 		n.ackCh = make(chan struct{})
 	}
@@ -188,6 +189,10 @@ func (n *Node) serveLog(w http.ResponseWriter, r *http.Request) {
 	from, err := strconv.ParseUint(r.URL.Query().Get("from"), 10, 64)
 	if err != nil || from < 1 {
 		http.Error(w, "from must be a number from 1", http.StatusBadRequest)
+		return
+	}
+	if last := n.cfg.Log.Last(); from-1 > last {
+		http.Error(w, fmt.Sprintf("from=%d is past the end of my log (%d), the follower log is from another leader", from, last), http.StatusConflict)
 		return
 	}
 	if f := r.URL.Query().Get("replica"); f != "" {

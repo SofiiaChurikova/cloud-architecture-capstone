@@ -1,12 +1,14 @@
 package metrics
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -91,6 +93,9 @@ func (m *HTTP) observe(op string, status int, took time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requests[[2]string{op, strconv.Itoa(status)}]++
+	if status >= 500 {
+		return
+	}
 	h := m.duration[op]
 	if h == nil {
 		h = &histogram{counts: make([]uint64, len(Buckets))}
@@ -120,7 +125,7 @@ func (m *HTTP) write(w io.Writer) {
 		fmt.Fprintf(w, "kv_requests_total%s %d\n", labels([]string{"op", k[0], "status", k[1]}), m.requests[k])
 	}
 
-	fmt.Fprint(w, "# HELP kv_request_duration_seconds How long item requests take.\n# TYPE kv_request_duration_seconds histogram\n")
+	fmt.Fprint(w, "# HELP kv_request_duration_seconds How long item requests take, without 5xx answers.\n# TYPE kv_request_duration_seconds histogram\n")
 	ops := make([]string, 0, len(m.duration))
 	for op := range m.duration {
 		ops = append(ops, op)
@@ -163,7 +168,7 @@ func quiet(r *http.Request) bool {
 func (m *HTTP) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(TraceHeader)
-		if id == "" {
+		if !validTrace.MatchString(id) {
 			id = NewTraceID()
 			r.Header.Set(TraceHeader, id)
 		}
@@ -181,8 +186,18 @@ func (m *HTTP) Wrap(next http.Handler) http.Handler {
 			m.observe(op, sw.status, took)
 		}
 		if !quiet(r) {
-			m.log.Info("request", "trace_id", id, "method", r.Method, "path", r.URL.Path,
-				"status", sw.status, "ms", float64(took.Microseconds())/1000)
+			attrs := []any{"trace_id", id, "method", r.Method, "path", r.URL.Path,
+				"status", sw.status, "ms", float64(took.Microseconds()) / 1000}
+			for _, h := range []string{"X-Shard-Id", "X-Replicas", "X-Version"} {
+				if v := sw.Header().Get(h); v != "" {
+					attrs = append(attrs, strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(h, "X-")), "-", "_"), v)
+				}
+			}
+			if sw.status >= 500 {
+				m.log.Error("request", append(attrs, "error", strings.TrimSpace(sw.errBody.String()))...)
+			} else {
+				m.log.Info("request", attrs...)
+			}
 		}
 	})
 }
@@ -193,9 +208,12 @@ func NewTraceID() string {
 	return hex.EncodeToString(b)
 }
 
+var validTrace = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status  int
+	errBody bytes.Buffer
 }
 
 func (w *statusWriter) WriteHeader(code int) {
@@ -208,6 +226,9 @@ func (w *statusWriter) WriteHeader(code int) {
 func (w *statusWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
+	}
+	if w.status >= 500 && w.errBody.Len() < 200 {
+		w.errBody.Write(b[:min(len(b), 200-w.errBody.Len())])
 	}
 	return w.ResponseWriter.Write(b)
 }

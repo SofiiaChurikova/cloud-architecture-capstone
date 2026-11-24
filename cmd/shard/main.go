@@ -30,7 +30,7 @@ func main() {
 	id := env("REPLICA_ID", shard+"-a")
 	role := env("ROLE", "leader")
 	addr := env("ADVERTISE_ADDR", "http://localhost:"+port)
-	coordinator := env("COORDINATOR_URL", "http://localhost:8080")
+	coordinator := env("COORDINATOR_URL", "http://localhost:9080")
 	leader := os.Getenv("LEADER_URL")
 	dir := os.Getenv("DATA_DIR")
 

@@ -14,7 +14,11 @@ An AI agent can use the store through MCP, only within clear limits.
 - **THEN** it gets a tool error "item not found", not a crash
 
 ### Requirement: Limits for the agent
-The MCP server SHALL NOT expose deleting or creating tables, the `w` / `r` parameters or `/internal/*`. `delete_item` SHALL delete one key and only with `confirm: true`.
+The MCP server SHALL NOT expose deleting or creating tables, overwriting items, the `w` / `r` parameters or `/internal/*`. `create_item` SHALL fail if the item exists. `delete_item` SHALL delete one key, only with `confirm: true`, and at most `MCP_MAX_DELETES` (default 5) times per session. Tools SHALL carry annotations: read-only for list/exists/read, destructive for delete.
+
+#### Scenario: Create an existing item
+- **WHEN** the agent calls `create_item` for a key that exists
+- **THEN** nothing changes and the tool says the item already exists
 
 #### Scenario: Delete without confirm
 - **WHEN** the agent calls `delete_item` without `confirm: true`

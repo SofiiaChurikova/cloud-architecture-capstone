@@ -9,12 +9,14 @@
 | `list_tables` | list tables | `GET /tables` |
 | `exists_item` | does an item exist | `HEAD /tables/{t}/items/{k}` |
 | `read_item` | read one item and its version | `GET /tables/{t}/items/{k}` |
-| `create_item` | create or replace one item | `PUT /tables/{t}/items/{k}` |
-| `delete_item` | delete one item, only with `confirm: true` | `DELETE /tables/{t}/items/{k}` |
+| `create_item` | create one new item, fails if it exists | `HEAD`, then `PUT /tables/{t}/items/{k}` |
+| `delete_item` | delete one item, only with `confirm: true`, at most 5 per session | `DELETE /tables/{t}/items/{k}` |
 
-Not exposed on purpose: creating or deleting tables, `w` / `r`, `/internal/*`.
+Not exposed on purpose: creating or deleting tables, overwriting items, `w` / `r`, `/internal/*`.
 
-Errors (missing table or item, wrong token, store down, delete without confirm) come back as tool errors with a short message, so the agent can tell the user what happened.
+Every tool has annotations: `readOnlyHint` on list/exists/read, `destructiveHint` on delete. Claude Desktop uses them to ask me before a tool that changes data. `MCP_MAX_DELETES` changes the delete limit.
+
+Errors (missing table or item, wrong token, store down, delete without confirm, item exists, delete limit) come back as tool errors with a short message, so the agent can tell the user what happened. A `503` after the leader already wrote the item says so ("the leader already has it as version X"), so the agent checks before retrying. Numbers in items are kept exactly (no float64 round trip).
 
 ## Build
 

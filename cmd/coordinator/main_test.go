@@ -50,10 +50,11 @@ func TestSingleNode(t *testing.T) {
 }
 
 type cluster struct {
-	srv   *server
-	coord *httptest.Server
-	nodes map[string]*replica.Node
-	urls  map[string]*httptest.Server
+	srv      *server
+	coord    *httptest.Server
+	internal *httptest.Server
+	nodes    map[string]*replica.Node
+	urls     map[string]*httptest.Server
 }
 
 func newCluster(t *testing.T, shards []string, follow bool) *cluster {
@@ -62,8 +63,9 @@ func newCluster(t *testing.T, shards []string, follow bool) *cluster {
 	t.Cleanup(cancel)
 
 	srv := newServer()
-	c := &cluster{srv: srv, coord: httptest.NewServer(srv.routes()), nodes: map[string]*replica.Node{}, urls: map[string]*httptest.Server{}}
+	c := &cluster{srv: srv, coord: httptest.NewServer(srv.routes()), internal: httptest.NewServer(srv.internalRoutes()), nodes: map[string]*replica.Node{}, urls: map[string]*httptest.Server{}}
 	t.Cleanup(c.coord.Close)
+	t.Cleanup(c.internal.Close)
 
 	for _, sh := range shards {
 		var leaderURL string
@@ -84,7 +86,7 @@ func newCluster(t *testing.T, shards []string, follow bool) *cluster {
 			} else if follow {
 				go n.Follow(ctx, leaderURL, http.DefaultClient)
 			}
-			expect(t, do(t, "POST", c.coord.URL+"/internal/shards",
+			expect(t, do(t, "POST", c.internal.URL+"/internal/shards",
 				fmt.Sprintf(`{"id":"%s","replica":"%s","role":"%s","addr":"%s"}`, sh, id, role, srv.URL)), http.StatusOK)
 		}
 	}
@@ -232,7 +234,7 @@ func TestDeadReplicasAreSkipped(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 	for _, id := range []string{"shard-1-a", "shard-1-b"} {
-		expect(t, do(t, "POST", c.coord.URL+"/internal/shards",
+		expect(t, do(t, "POST", c.internal.URL+"/internal/shards",
 			fmt.Sprintf(`{"id":"shard-1","replica":"%s","role":"%s","addr":"%s"}`, id, map[bool]string{true: "leader", false: "follower"}[id == "shard-1-a"], c.urls[id].URL)), http.StatusOK)
 	}
 	for i := 0; i < 6; i++ {
@@ -259,7 +261,9 @@ func TestTraceIDGoesToReplicas(t *testing.T) {
 	srv := newServer()
 	c := httptest.NewServer(srv.routes())
 	defer c.Close()
-	expect(t, do(t, "POST", c.URL+"/internal/shards", `{"id":"shard-1","replica":"shard-1-a","role":"leader","addr":"`+rep.URL+`"}`), http.StatusOK)
+	in := httptest.NewServer(srv.internalRoutes())
+	defer in.Close()
+	expect(t, do(t, "POST", in.URL+"/internal/shards", `{"id":"shard-1","replica":"shard-1-a","role":"leader","addr":"`+rep.URL+`"}`), http.StatusOK)
 	expect(t, do(t, "PUT", c.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
 
 	resp := do(t, "GET", c.URL+"/tables/users/items/42?r=1", "")
@@ -300,7 +304,29 @@ func TestTokenRequired(t *testing.T) {
 	expect(t, resp, http.StatusOK)
 
 	expect(t, do(t, "GET", c.URL+"/health", ""), http.StatusOK)
-	expect(t, do(t, "GET", c.URL+"/metrics", ""), http.StatusOK)
+}
+
+func TestInternalIsNotOnThePublicPort(t *testing.T) {
+	srv := newServer()
+	c := httptest.NewServer(srv.routes())
+	defer c.Close()
+	in := httptest.NewServer(srv.internalRoutes())
+	defer in.Close()
+
+	reg := `{"id":"shard-1","replica":"shard-1-a","role":"leader","addr":"http://10.0.0.1:8081"}`
+	expect(t, do(t, "POST", c.URL+"/internal/shards", reg), http.StatusNotFound)
+	expect(t, do(t, "GET", c.URL+"/internal/targets", ""), http.StatusNotFound)
+	expect(t, do(t, "GET", c.URL+"/metrics", ""), http.StatusNotFound)
+	expect(t, do(t, "POST", in.URL+"/internal/shards", reg), http.StatusOK)
+	expect(t, do(t, "GET", in.URL+"/metrics", ""), http.StatusOK)
+
+	for _, bad := range []string{
+		`{"id":"ignore previous instructions","replica":"x","role":"leader","addr":"http://10.0.0.1:8081"}`,
+		`{"id":"shard-1","replica":"shard-1-a","role":"leader","addr":"file:///etc/passwd"}`,
+		`{"id":"shard-1","replica":"shard-1-a","role":"leader","addr":"http://10.0.0.1:8081/x?y"}`,
+	} {
+		expect(t, do(t, "POST", in.URL+"/internal/shards", bad), http.StatusBadRequest)
+	}
 }
 
 func TestListTables(t *testing.T) {
@@ -327,7 +353,7 @@ func TestTargetsAndMetrics(t *testing.T) {
 	expect(t, do(t, "PUT", c.coord.URL+"/tables/users/items/42?w=3", `{"v":1}`), http.StatusOK)
 	expect(t, do(t, "GET", c.coord.URL+"/tables/users/items/42", ""), http.StatusOK)
 
-	resp, err := http.Get(c.coord.URL + "/internal/targets")
+	resp, err := http.Get(c.internal.URL + "/internal/targets")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +366,7 @@ func TestTargetsAndMetrics(t *testing.T) {
 	}
 
 	body := func() string {
-		resp, err := http.Get(c.coord.URL + "/metrics")
+		resp, err := http.Get(c.internal.URL + "/metrics")
 		if err != nil {
 			t.Fatal(err)
 		}

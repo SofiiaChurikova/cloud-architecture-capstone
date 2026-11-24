@@ -214,3 +214,34 @@ func TestMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestAckPastTheLogIsRefused(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	leader.AckTimeout = 100 * time.Millisecond
+	srv := start(t, leader)
+	for _, name := range []string{"ghost1", "ghost2"} {
+		resp, err := http.Get(srv.URL + "/internal/log?replica=" + name + "&from=1000000000")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("from past the log: %d, want 409", resp.StatusCode)
+		}
+	}
+	if resp := put(t, srv.URL+"/internal/items/users/1?w=3", `{"v":1}`); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("w=3 without real followers: %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestReplacedFollowerStartsFromZero(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	for i := 0; i < 3; i++ {
+		leader.cfg.Log.Append(wal.Entry{Table: "t", Key: "k"})
+	}
+	leader.setAck("s1-b", 3)
+	leader.setAck("s1-b", 0)
+	if lag := leader.Lag(time.Now())["s1-b"]; lag.Entries != 3 {
+		t.Fatalf("a follower that came back empty shows %d entries behind, want 3", lag.Entries)
+	}
+}

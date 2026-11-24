@@ -154,7 +154,7 @@ paths:
 
   /internal/targets:
     get:
-      summary: Replicas for Prometheus (HTTP service discovery format)
+      summary: Replicas for Prometheus (HTTP service discovery format), internal port 9080 only
       security: []
       responses:
         "200":
@@ -177,7 +177,7 @@ paths:
 
   /metrics:
     get:
-      summary: Metrics in the Prometheus text format
+      summary: Metrics in the Prometheus text format, internal port 9080 only
       security: []
       responses:
         "200":
@@ -185,7 +185,7 @@ paths:
 
   /internal/shards:
     post:
-      summary: Register a replica, every replica calls it every 2 s as a heartbeat
+      summary: Register a replica, every replica calls it every 2 s as a heartbeat (internal port 9080 only)
       requestBody:
         required: true
         content:
@@ -196,9 +196,9 @@ paths:
         "200":
           description: Replica added, its shard is on the ring
         "400":
-          description: Body is not valid
+          description: Body is not valid (ids must match ^[a-z0-9-]{1,32}$, addr must be http://host:port)
     get:
-      summary: List shards and their replicas
+      summary: List shards and their replicas (internal port 9080 only)
       responses:
         "200":
           description: Shards on the ring with their replicas

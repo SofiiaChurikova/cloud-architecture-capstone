@@ -54,7 +54,7 @@ func fakeStore(t *testing.T, token string) *httptest.Server {
 		}
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+token {
+		if token != "" && r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
 			return
 		}
@@ -208,6 +208,71 @@ func TestSchemasAreValid(t *testing.T) {
 		for _, r := range sc["required"].([]any) {
 			if _, ok := props[r.(string)]; !ok {
 				t.Fatalf("%s: required %q is not in properties", tl["name"], r)
+			}
+		}
+	}
+}
+
+func TestCreateNeverOverwrites(t *testing.T) {
+	s := newTestServer(t, fakeStore(t, "").URL, "")
+	if r := call(t, s, "create_item", `{"table":"users","key":"1","item":{"id":"1","n":9007199254740993}}`); r.IsError {
+		t.Fatalf("first create: %+v", r)
+	}
+	r := call(t, s, "create_item", `{"table":"users","key":"1","item":{}}`)
+	if !r.IsError || !strings.Contains(r.Content[0].Text, "already exists") {
+		t.Fatalf("second create: %+v", r)
+	}
+	if r := call(t, s, "read_item", `{"table":"users","key":"1"}`); !strings.Contains(r.Content[0].Text, "9007199254740993") {
+		t.Fatalf("big number changed on the way: %s", r.Content[0].Text)
+	}
+}
+
+func TestDeleteLimit(t *testing.T) {
+	s := newTestServer(t, fakeStore(t, "").URL, "")
+	s.deletesLeft = 2
+	for i, key := range []string{"1", "2", "3"} {
+		call(t, s, "create_item", `{"table":"users","key":"`+key+`","item":{}}`)
+		r := call(t, s, "delete_item", `{"table":"users","key":"`+key+`","confirm":true}`)
+		if (i < 2) == r.IsError {
+			t.Fatalf("delete %d: %+v", i+1, r)
+		}
+	}
+}
+
+func TestNotConfirmedWrite(t *testing.T) {
+	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("X-Version", "42")
+		http.Error(w, "only 2 of 3 replicas confirmed", http.StatusServiceUnavailable)
+	}))
+	defer store.Close()
+	s := newTestServer(t, store.URL, "")
+	r := call(t, s, "create_item", `{"table":"users","key":"1","item":{}}`)
+	if !r.IsError || !strings.Contains(r.Content[0].Text, "version 42") {
+		t.Fatalf("503 with a version: %+v", r)
+	}
+}
+
+func TestAnnotations(t *testing.T) {
+	s := newTestServer(t, "http://127.0.0.1:1", "")
+	for _, tl := range s.tools {
+		ro := tl.Annotations["readOnlyHint"] == true
+		destructive := tl.Annotations["destructiveHint"] == true
+		switch tl.Name {
+		case "list_tables", "exists_item", "read_item":
+			if !ro {
+				t.Fatalf("%s should be read only", tl.Name)
+			}
+		case "delete_item":
+			if ro || !destructive {
+				t.Fatalf("delete_item should be destructive")
+			}
+		case "create_item":
+			if ro || destructive {
+				t.Fatalf("create_item only adds items")
 			}
 		}
 	}

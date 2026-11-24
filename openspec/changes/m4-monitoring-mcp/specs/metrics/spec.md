@@ -7,14 +7,14 @@ The coordinator and every replica measure their requests and state, so latency, 
 ## ADDED Requirements
 
 ### Requirement: Metrics endpoint
-The coordinator (port 8080) and every replica (port 8081) SHALL expose metrics in the Prometheus text format on `GET /metrics`.
+The coordinator (internal port 9080) and every replica (port 8081) SHALL expose metrics in the Prometheus text format on `GET /metrics`.
 
 #### Scenario: Scrape a replica
 - **WHEN** Prometheus calls `GET /metrics` on a replica
 - **THEN** it gets `200` with the metrics below
 
 ### Requirement: Request metrics
-The coordinator and replicas SHALL count requests by operation and status code and SHALL record request duration in a histogram, so p50, p95 and p99, throughput and error rate can be computed from them.
+The coordinator and replicas SHALL count requests by operation and status code and SHALL record the duration of requests that did not end with `5xx` in a histogram, so p50, p95 and p99, throughput and error rate can be computed from them. Fast `5xx` answers SHALL NOT make the latency look better.
 
 #### Scenario: Error rate
 - **WHEN** some writes get `503`
