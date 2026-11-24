@@ -101,3 +101,26 @@ func TestWait(t *testing.T) {
 		t.Fatal("Wait should time out")
 	}
 }
+
+func TestVersionIsLeaderTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log.jsonl")
+	l, _ := Open(path)
+	now := time.UnixMicro(1000)
+	l.Now = func() time.Time { return now }
+
+	a, _ := l.Append(Entry{Table: "t", Key: "1"})
+	b, _ := l.Append(Entry{Table: "t", Key: "1"})
+	now = time.UnixMicro(500)
+	c, _ := l.Append(Entry{Table: "t", Key: "1"})
+	if a.Version != 1000 || b.Version != 1001 || c.Version != 1002 {
+		t.Fatalf("versions %d %d %d, want 1000 1001 1002", a.Version, b.Version, c.Version)
+	}
+	l.Close()
+
+	l, _ = Open(path)
+	l.Now = func() time.Time { return time.UnixMicro(10) }
+	d, _ := l.Append(Entry{Table: "t", Key: "1"})
+	if d.Version != 1003 {
+		t.Fatalf("after reopen with an older clock version %d, want 1003", d.Version)
+	}
+}

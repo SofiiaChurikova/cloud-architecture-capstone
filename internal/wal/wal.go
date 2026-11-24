@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 type Entry struct {
 	Offset  uint64          `json:"offset"`
+	Version uint64          `json:"version"`
 	Table   string          `json:"table"`
 	Key     string          `json:"key"`
 	Value   json.RawMessage `json:"value,omitempty"`
@@ -23,12 +25,15 @@ type Log struct {
 	f       *os.File
 	entries []Entry
 	changed chan struct{}
+	version uint64
+
+	Now func() time.Time
 }
 
 var ErrGap = errors.New("entry does not follow the last offset")
 
 func Open(path string) (*Log, error) {
-	l := &Log{changed: make(chan struct{})}
+	l := &Log{changed: make(chan struct{}), Now: time.Now}
 	if path == "" {
 		return l, nil
 	}
@@ -47,6 +52,7 @@ func Open(path string) (*Log, error) {
 			break
 		}
 		l.entries = append(l.entries, e)
+		l.version = max(l.version, e.Version)
 		good += int64(len(line)) + 1
 	}
 	if err := f.Truncate(good); err != nil {
@@ -71,6 +77,10 @@ func (l *Log) Append(e Entry) (Entry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e.Offset = uint64(len(l.entries)) + 1
+	e.Version = uint64(l.Now().UnixMicro())
+	if e.Version <= l.version {
+		e.Version = l.version + 1
+	}
 	if err := l.write([]Entry{e}); err != nil {
 		return Entry{}, err
 	}
@@ -116,6 +126,9 @@ func (l *Log) write(batch []Entry) error {
 		}
 	}
 	l.entries = append(l.entries, batch...)
+	for _, e := range batch {
+		l.version = max(l.version, e.Version)
+	}
 	close(l.changed)
 	l.changed = make(chan struct{})
 	return nil

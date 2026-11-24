@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,7 +135,9 @@ func TestQuorumReadReturnsNewest(t *testing.T) {
 	c := newCluster(t, []string{"shard-1"}, false)
 	url := c.coord.URL + "/tables/users/items/42"
 
-	expect(t, do(t, "PUT", url+"?w=1", `{"v":1}`), http.StatusOK)
+	w := do(t, "PUT", url+"?w=1", `{"v":1}`)
+	expect(t, w, http.StatusOK)
+	version := w.Header.Get("X-Version")
 
 	stale := 0
 	for i := 0; i < 6; i++ {
@@ -147,8 +151,8 @@ func TestQuorumReadReturnsNewest(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		resp := do(t, "GET", url+"?r=3", "")
 		expect(t, resp, http.StatusOK)
-		if resp.Header.Get("X-Version") != "1" {
-			t.Fatalf("r=3 version %q, want 1", resp.Header.Get("X-Version"))
+		if resp.Header.Get("X-Version") != version {
+			t.Fatalf("r=3 version %q, want %s", resp.Header.Get("X-Version"), version)
 		}
 	}
 }
@@ -241,4 +245,123 @@ func TestDeadReplicasAreSkipped(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 	expect(t, do(t, "PUT", url, `{"v":2}`), http.StatusServiceUnavailable)
+}
+
+func TestTraceIDGoesToReplicas(t *testing.T) {
+	got := make(chan string, 1)
+	rep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get("X-Trace-Id")
+		w.Header().Set("X-Version", "1")
+		w.Write([]byte(`{"v":1}`))
+	}))
+	defer rep.Close()
+
+	srv := newServer()
+	c := httptest.NewServer(srv.routes())
+	defer c.Close()
+	expect(t, do(t, "POST", c.URL+"/internal/shards", `{"id":"shard-1","replica":"shard-1-a","role":"leader","addr":"`+rep.URL+`"}`), http.StatusOK)
+	expect(t, do(t, "PUT", c.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
+
+	resp := do(t, "GET", c.URL+"/tables/users/items/42?r=1", "")
+	expect(t, resp, http.StatusOK)
+	id := resp.Header.Get("X-Trace-Id")
+	if id == "" || <-got != id {
+		t.Fatalf("trace id %q did not reach the replica", id)
+	}
+
+	req, _ := http.NewRequest("GET", c.URL+"/tables/users/items/42?r=1", nil)
+	req.Header.Set("X-Trace-Id", "my-trace")
+	r2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Body.Close()
+	if r2.Header.Get("X-Trace-Id") != "my-trace" || <-got != "my-trace" {
+		t.Fatal("the client's trace id was not kept")
+	}
+}
+
+func TestTokenRequired(t *testing.T) {
+	srv := newServer()
+	srv.token = "secret"
+	c := httptest.NewServer(srv.routes())
+	defer c.Close()
+
+	expect(t, do(t, "PUT", c.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusUnauthorized)
+	expect(t, do(t, "GET", c.URL+"/tables", ""), http.StatusUnauthorized)
+
+	req, _ := http.NewRequest("PUT", c.URL+"/tables/users", strings.NewReader(`{"partition_key":"id"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	expect(t, resp, http.StatusOK)
+
+	expect(t, do(t, "GET", c.URL+"/health", ""), http.StatusOK)
+	expect(t, do(t, "GET", c.URL+"/metrics", ""), http.StatusOK)
+}
+
+func TestListTables(t *testing.T) {
+	c := httptest.NewServer(newServer().routes())
+	defer c.Close()
+	expect(t, do(t, "PUT", c.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
+	expect(t, do(t, "PUT", c.URL+"/tables/orders", `{"partition_key":"id"}`), http.StatusOK)
+
+	resp, err := http.Get(c.URL + "/tables")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var tables []Table
+	json.NewDecoder(resp.Body).Decode(&tables)
+	if len(tables) != 2 || tables[0].Name != "orders" || tables[1].Name != "users" {
+		t.Fatalf("tables %+v, want orders and users", tables)
+	}
+}
+
+func TestTargetsAndMetrics(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	c.srv.deadAfter = 200 * time.Millisecond
+	expect(t, do(t, "PUT", c.coord.URL+"/tables/users/items/42?w=3", `{"v":1}`), http.StatusOK)
+	expect(t, do(t, "GET", c.coord.URL+"/tables/users/items/42", ""), http.StatusOK)
+
+	resp, err := http.Get(c.coord.URL + "/internal/targets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var groups []targetGroup
+	json.NewDecoder(resp.Body).Decode(&groups)
+	resp.Body.Close()
+	if len(groups) != 3 || groups[0].Labels["replica"] != "shard-1-a" || groups[0].Labels["shard"] != "shard-1" ||
+		strings.HasPrefix(groups[0].Targets[0], "http") {
+		t.Fatalf("targets %+v, want 3 replicas as host:port", groups)
+	}
+
+	body := func() string {
+		resp, err := http.Get(c.coord.URL + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	m := body()
+	for _, want := range []string{
+		`kv_replicas_alive{shard="shard-1"} 3`,
+		`kv_requests_total{op="write",status="200"} 1`,
+		`kv_requests_total{op="read",status="200"} 1`,
+		`kv_request_duration_seconds_count{op="read"} 1`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Fatalf("metrics have no %q:\n%s", want, m)
+		}
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	if !strings.Contains(body(), `kv_replicas_alive{shard="shard-1"} 0`) {
+		t.Fatal("replicas without heartbeats are still counted as alive")
+	}
 }

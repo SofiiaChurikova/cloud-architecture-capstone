@@ -1,0 +1,42 @@
+groups:
+  - name: kvstore
+    rules:
+      - alert: NodeDown
+        expr: up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} {{ $labels.replica }} ({{ $labels.instance }}) does not answer"
+
+      - alert: ShardMissingReplicas
+        expr: kv_replicas_alive < 3
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.shard }} has {{ $value }} of 3 replicas alive"
+
+      - alert: HighReadLatency
+        expr: histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op="read"}[1m]))) > 0.02
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "read p99 is {{ $value | humanizeDuration }}, SLO is 20ms"
+
+      - alert: HighWriteLatency
+        expr: histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op=~"write|delete"}[1m]))) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "write p99 is {{ $value | humanizeDuration }}, SLO is 100ms"
+
+      - alert: ReplicationLag
+        expr: max by (shard, follower) (kv_replication_lag_seconds) > 5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.follower }} is {{ $value | humanizeDuration }} behind its leader"

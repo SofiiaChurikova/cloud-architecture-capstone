@@ -20,6 +20,7 @@ type creator struct{}
 type kvDB struct {
 	url    string
 	query  string
+	token  string
 	client *http.Client
 }
 
@@ -29,7 +30,8 @@ func init() {
 
 func (creator) Create(p *properties.Properties) (ycsb.DB, error) {
 	db := &kvDB{
-		url: p.GetString("kvstore.url", "http://localhost:8080"),
+		url:   p.GetString("kvstore.url", "http://localhost:8080"),
+		token: p.GetString("kvstore.token", ""),
 		client: &http.Client{
 			Timeout:   5 * time.Second,
 			Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 256, IdleConnTimeout: 90 * time.Second},
@@ -68,6 +70,7 @@ func (db *kvDB) itemURL(table, key string) string {
 
 func (db *kvDB) Read(ctx context.Context, table, key string, _ []string) (map[string][]byte, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, db.itemURL(table, key), nil)
+	db.auth(req)
 	resp, err := db.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -122,12 +125,19 @@ func (db *kvDB) Delete(ctx context.Context, table, key string) error {
 	return nil
 }
 
+func (db *kvDB) auth(req *http.Request) {
+	if db.token != "" {
+		req.Header.Set("Authorization", "Bearer "+db.token)
+	}
+}
+
 func (db *kvDB) do(ctx context.Context, method, url string, body []byte) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	db.auth(req)
 	resp, err := db.client.Do(req)
 	if err != nil {
 		return 0, err

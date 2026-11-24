@@ -1,15 +1,35 @@
 openapi: 3.0.3
 info:
   title: KV store - coordinator API
-  version: "m3"
+  version: "m4"
   description: >-
-    Public API of the key-value store (M3). Clients talk only to the coordinator.
+    Public API of the key-value store (M4). Clients talk only to the coordinator.
     The ring picks the shard, writes go to the leader of the shard,
-    reads ask R replicas of the shard and return the newest version.
+    reads ask R replicas of the shard and return the newest version (last write wins).
+    When the coordinator has API_TOKEN set, every /tables request needs
+    "Authorization: Bearer <token>", otherwise 401.
+    Every response has X-Trace-Id (taken from the request or new).
 servers:
   - url: http://localhost:8080
+security:
+  - token: []
 
 paths:
+  /tables:
+    get:
+      summary: List tables
+      responses:
+        "200":
+          description: All tables, sorted by name
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Table"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /tables/{table}:
     parameters:
       - $ref: "#/components/parameters/table"
@@ -32,6 +52,8 @@ paths:
           description: Body is not valid
         "409":
           description: Table already exists
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     get:
       summary: Get a table definition
       responses:
@@ -43,6 +65,8 @@ paths:
                 $ref: "#/components/schemas/Table"
         "404":
           description: Table not found
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /tables/{table}/items/{key}:
     parameters:
@@ -71,6 +95,8 @@ paths:
               $ref: "#/components/headers/X-Version"
         "400":
           description: Body is not a JSON object, or w / r is not 1-3
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: Table not found
         "503":
@@ -101,6 +127,8 @@ paths:
           description: Table or item not found
         "503":
           description: The shards are not registered yet, or fewer than R replicas answered
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     head:
       summary: EXISTS - check if an item exists
       parameters:
@@ -123,6 +151,37 @@ paths:
           description: Table not found
         "503":
           description: The shards are not registered yet, the leader is down, or fewer than W replicas confirmed (the write can still be in the leader log)
+
+  /internal/targets:
+    get:
+      summary: Replicas for Prometheus (HTTP service discovery format)
+      security: []
+      responses:
+        "200":
+          description: One target per replica with shard and replica labels
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    targets:
+                      type: array
+                      items:
+                        type: string
+                      example: ["10.20.16.10:8081"]
+                    labels:
+                      type: object
+                      example: {shard: shard-1, replica: shard-1-a}
+
+  /metrics:
+    get:
+      summary: Metrics in the Prometheus text format
+      security: []
+      responses:
+        "200":
+          description: kv_requests_total, kv_request_duration_seconds, kv_replicas_alive
 
   /internal/shards:
     post:
@@ -153,6 +212,7 @@ paths:
   /health:
     get:
       summary: Health check
+      security: []
       responses:
         "200":
           description: Service is up
@@ -160,9 +220,16 @@ paths:
 components:
   headers:
     X-Version:
-      description: Version of the item = log offset of its last write in the shard
+      description: Version of the item = time of its last write on the leader, in microseconds, always growing. The greater version wins
       schema:
         type: integer
+  securitySchemes:
+    token:
+      type: http
+      scheme: bearer
+  responses:
+    Unauthorized:
+      description: API_TOKEN is set and the token is missing or wrong
   parameters:
     w:
       name: w

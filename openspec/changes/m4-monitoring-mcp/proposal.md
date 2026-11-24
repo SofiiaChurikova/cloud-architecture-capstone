@@ -31,5 +31,5 @@ None. M2 and M3 specs are not archived yet, everything new is in new capabilitie
 
 - Code: `internal/metrics` (new), `internal/replica` (metrics, lag, timestamps), `internal/wal` (timestamp in the entry), `internal/store` (LWW), `cmd/coordinator` (metrics, trace IDs, token, targets for Prometheus), `cmd/shard`, `cmd/mcp` (new), `bench/kvstore` (token)
 - Infra: `infra/app.yaml` (monitoring instance, ports 9090 and 3000), `monitoring/` (Prometheus config, alert rules, Grafana dashboard), pipeline uploads the monitoring files and builds the MCP binary
-- Go 1.22 -> 1.23 (the MCP SDK needs it); new libraries: Prometheus client, MCP Go SDK
+- No new libraries: the Prometheus text format and MCP over stdio (JSON-RPC, one message per line) are small text protocols, written by hand in `internal/metrics` and `cmd/mcp`. The Prometheus client and the MCP Go SDK pull in packages from `golang.org/x` that I couldn't download in my build environment
 - Out of scope: the optional parts of M4 (custom merge strategy, incident tickets, backups), central log storage, leader failover

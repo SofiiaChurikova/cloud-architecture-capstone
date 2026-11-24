@@ -8,10 +8,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/metrics"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/store"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/wal"
 )
@@ -53,7 +55,7 @@ func New(cfg Config) *Node {
 func (n *Node) Store() *store.Store { return n.store }
 
 func (n *Node) apply(e wal.Entry) {
-	n.store.Apply(e.Table, e.Key, store.Item{Value: e.Value, Version: e.Offset, Deleted: e.Deleted})
+	n.store.Apply(e.Table, e.Key, store.Item{Value: e.Value, Version: e.Version, Deleted: e.Deleted})
 }
 
 func (n *Node) Routes(mux *http.ServeMux) {
@@ -122,7 +124,7 @@ func (n *Node) item(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		n.apply(e)
-		w.Header().Set("X-Version", strconv.FormatUint(e.Offset, 10))
+		w.Header().Set("X-Version", strconv.FormatUint(e.Version, 10))
 
 		if got := n.waitAcks(r.Context(), e.Offset, need); got < need {
 			http.Error(w, fmt.Sprintf("only %d of %d replicas confirmed", got, need), http.StatusServiceUnavailable)
@@ -251,6 +253,60 @@ func (n *Node) pull(ctx context.Context, leader string, from uint64, client *htt
 		return nil, err
 	}
 	return entries, nil
+}
+
+type Lag struct {
+	Entries uint64
+	Seconds float64
+}
+
+func (n *Node) Lag(now time.Time) map[string]Lag {
+	n.mu.Lock()
+	acked := make(map[string]uint64, len(n.acked))
+	for f, a := range n.acked {
+		acked[f] = a
+	}
+	n.mu.Unlock()
+
+	last := n.cfg.Log.Last()
+	out := make(map[string]Lag, len(acked))
+	for f, a := range acked {
+		var l Lag
+		if a < last {
+			l.Entries = last - a
+			if e := n.cfg.Log.From(a+1, 1); len(e) == 1 {
+				l.Seconds = max(0, now.Sub(time.UnixMicro(int64(e[0].Version))).Seconds())
+			}
+		}
+		out[f] = l
+	}
+	return out
+}
+
+func (n *Node) WriteMetrics(w io.Writer) {
+	metrics.WriteGauge(w, "kv_keys", "Keys this replica holds, deleted ones not counted.", []metrics.Sample{{Value: float64(n.store.Len())}})
+	metrics.WriteGauge(w, "kv_log_offset", "Last offset in this replica's log.", []metrics.Sample{{Value: float64(n.cfg.Log.Last())}})
+	leader := 0.0
+	if n.cfg.Leader {
+		leader = 1
+	}
+	metrics.WriteGauge(w, "kv_is_leader", "1 if this replica is the leader of its shard.", []metrics.Sample{{Value: leader}})
+	if !n.cfg.Leader {
+		return
+	}
+	lag := n.Lag(time.Now())
+	followers := make([]string, 0, len(lag))
+	for f := range lag {
+		followers = append(followers, f)
+	}
+	sort.Strings(followers)
+	var secs, entries []metrics.Sample
+	for _, f := range followers {
+		secs = append(secs, metrics.Sample{Labels: []string{"follower", f}, Value: lag[f].Seconds})
+		entries = append(entries, metrics.Sample{Labels: []string{"follower", f}, Value: float64(lag[f].Entries)})
+	}
+	metrics.WriteGauge(w, "kv_replication_lag_seconds", "How long ago the oldest entry the follower has not confirmed was written.", secs)
+	metrics.WriteGauge(w, "kv_replication_lag_entries", "How many entries the follower is behind.", entries)
 }
 
 func sleep(ctx context.Context, d time.Duration) {

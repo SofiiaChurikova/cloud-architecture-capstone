@@ -9,23 +9,23 @@
 
 ## 2. Code
 
-- [ ] 2.1 `/metrics` on the coordinator and replicas
-- [ ] 2.2 Replication lag on the leader
-- [ ] 2.3 Trace IDs + JSON logs
-- [ ] 2.4 Timestamp versions + last write wins
-- [ ] 2.5 `API_TOKEN` on the coordinator, token in the YCSB binding
-- [ ] 2.6 `cmd/mcp`: tools, schemas, errors
-- [ ] 2.7 `monitoring/`: Prometheus config, alert rules, Grafana dashboard
-- [ ] 2.8 Tests + local run with docker compose
+- [x] 2.1 `/metrics` on the coordinator and replicas
+- [x] 2.2 Replication lag on the leader
+- [x] 2.3 Trace IDs + JSON logs
+- [x] 2.4 Timestamp versions + last write wins
+- [x] 2.5 `API_TOKEN` on the coordinator, token in the YCSB binding
+- [x] 2.6 `cmd/mcp`: tools, schemas, errors
+- [x] 2.7 `monitoring/`: Prometheus config, alert rules, Grafana dashboard
+- [x] 2.8 Tests + local run (binaries + Prometheus + official MCP client)
 
 ## 3. AWS
 
-- [ ] 3.1 `infra/app.yaml`: monitoring instance, security groups; pipeline uploads monitoring files
+- [x] 3.1 `infra/app.yaml`: monitoring instance, security groups; pipeline uploads monitoring files
 - [ ] 3.2 Demo: dashboard, stop a node -> "node down" alert
 - [ ] 3.3 MCP from Claude Desktop against the AWS stack
 
 ## 4. Defense
 
-- [ ] 4.1 Budget for M4
+- [x] 4.1 Budget for M4
 - [ ] 4.2 AI design review
 - [ ] 4.3 README
