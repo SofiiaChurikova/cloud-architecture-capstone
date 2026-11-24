@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/metrics"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/replica"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/wal"
 )
@@ -28,9 +30,12 @@ func main() {
 	id := env("REPLICA_ID", shard+"-a")
 	role := env("ROLE", "leader")
 	addr := env("ADVERTISE_ADDR", "http://localhost:"+port)
-	coordinator := env("COORDINATOR_URL", "http://localhost:8080")
+	coordinator := env("COORDINATOR_URL", "http://localhost:9080")
 	leader := os.Getenv("LEADER_URL")
 	dir := os.Getenv("DATA_DIR")
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "shard", "replica", id)
+	slog.SetDefault(logger)
 
 	path := ""
 	if dir != "" {
@@ -52,6 +57,10 @@ func main() {
 	n := replica.New(replica.Config{ID: id, Shard: shard, Leader: isLeader, Log: l})
 	mux := http.NewServeMux()
 	n.Routes(mux)
+	reg := &metrics.Registry{}
+	reg.Add(n.WriteMetrics)
+	mux.Handle("GET /metrics", reg)
+	handler := metrics.New(reg, logger).Wrap(mux)
 
 	if !isLeader {
 		go n.Follow(context.Background(), leader, &http.Client{Timeout: 10 * time.Second})
@@ -59,7 +68,7 @@ func main() {
 	go register(coordinator, registration{ID: shard, Replica: id, Role: role, Addr: addr})
 
 	log.Printf("%s (%s of %s) listening on :%s", id, role, shard, port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
 
 func register(coordinator string, me registration) {

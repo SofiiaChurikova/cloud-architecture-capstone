@@ -25,6 +25,7 @@ func start(t *testing.T, n *Node) *httptest.Server {
 
 func memLog() *wal.Log {
 	l, _ := wal.Open("")
+	l.Now = func() time.Time { return time.UnixMicro(0) }
 	return l
 }
 
@@ -173,5 +174,74 @@ func TestFollowerResyncsFromItsOffset(t *testing.T) {
 	defer mu.Unlock()
 	if len(froms) == 0 || froms[0] != "6" {
 		t.Fatalf("first pull after restart asked from=%v, want 6", froms)
+	}
+}
+
+func TestLagGrowsWhenFollowerStops(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	leader.cfg.Log.Now = time.Now
+	lsrv := start(t, leader)
+	f := New(Config{ID: "s1-b", Shard: "s1", Log: memLog()})
+	ctx, cancel := context.WithCancel(context.Background())
+	go f.Follow(ctx, lsrv.URL, http.DefaultClient)
+
+	put(t, lsrv.URL+"/internal/items/users/1?w=2", `{"v":1}`)
+	waitFor(t, "follower to confirm", func() bool { return leader.Lag(time.Now())["s1-b"].Entries == 0 })
+
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	put(t, lsrv.URL+"/internal/items/users/2", `{"v":1}`)
+	put(t, lsrv.URL+"/internal/items/users/3", `{"v":1}`)
+
+	lag := leader.Lag(time.Now().Add(3 * time.Second))["s1-b"]
+	if lag.Entries != 2 || lag.Seconds < 3 {
+		t.Fatalf("lag %+v, want 2 entries and at least 3 s", lag)
+	}
+}
+
+func TestMetrics(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	lsrv := start(t, leader)
+	put(t, lsrv.URL+"/internal/items/users/1", `{"v":1}`)
+	put(t, lsrv.URL+"/internal/items/users/2", `{"v":1}`)
+	leader.setAck("s1-b", 1)
+
+	var b strings.Builder
+	leader.WriteMetrics(&b)
+	for _, want := range []string{"kv_keys 2\n", "kv_log_offset 2\n", "kv_is_leader 1\n", `kv_replication_lag_entries{follower="s1-b"} 1`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("metrics have no %q:\n%s", want, b.String())
+		}
+	}
+}
+
+func TestAckPastTheLogIsRefused(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	leader.AckTimeout = 100 * time.Millisecond
+	srv := start(t, leader)
+	for _, name := range []string{"ghost1", "ghost2"} {
+		resp, err := http.Get(srv.URL + "/internal/log?replica=" + name + "&from=1000000000")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("from past the log: %d, want 409", resp.StatusCode)
+		}
+	}
+	if resp := put(t, srv.URL+"/internal/items/users/1?w=3", `{"v":1}`); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("w=3 without real followers: %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestReplacedFollowerStartsFromZero(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	for i := 0; i < 3; i++ {
+		leader.cfg.Log.Append(wal.Entry{Table: "t", Key: "k"})
+	}
+	leader.setAck("s1-b", 3)
+	leader.setAck("s1-b", 0)
+	if lag := leader.Lag(time.Now())["s1-b"]; lag.Entries != 3 {
+		t.Fatalf("a follower that came back empty shows %d entries behind, want 3", lag.Entries)
 	}
 }

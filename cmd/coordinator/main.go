@@ -1,15 +1,18 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/metrics"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/ring"
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/store"
 )
@@ -25,7 +29,10 @@ const N = 3
 
 func main() {
 	port := env("PORT", "8080")
+	internalPort := env("INTERNAL_PORT", "9080")
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "coordinator"))
 	s := newServer()
+	s.token = os.Getenv("API_TOKEN")
 	s.W = envInt("W", 2)
 	s.R = envInt("R", 2)
 	if v := os.Getenv("EXPECTED_SHARDS"); v != "" {
@@ -36,7 +43,8 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	log.Printf("coordinator listening on :%s, N=%d W=%d R=%d, expected shards %v, %d tables", port, N, s.W, s.R, s.expected, len(s.tables))
+	log.Printf("coordinator listening on :%s, N=%d W=%d R=%d, expected shards %v, %d tables, token required: %v", port, N, s.W, s.R, s.expected, len(s.tables), s.token != "")
+	go func() { log.Fatal(http.ListenAndServe(":"+internalPort, s.internalRoutes())) }()
 	log.Fatal(http.ListenAndServe(":"+port, s.routes()))
 }
 
@@ -78,6 +86,7 @@ type server struct {
 	expected  []string
 	deadAfter time.Duration
 	tablesAt  string
+	token     string
 
 	mu     sync.RWMutex
 	tables map[string]Table
@@ -88,10 +97,13 @@ type server struct {
 	localVer atomic.Uint64
 	next     atomic.Uint64
 	client   *http.Client
+
+	reg     *metrics.Registry
+	metrics *metrics.HTTP
 }
 
 func newServer() *server {
-	return &server{
+	s := &server{
 		W:         2,
 		R:         2,
 		deadAfter: 6 * time.Second,
@@ -108,27 +120,106 @@ func newServer() *server {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
+		reg: &metrics.Registry{},
 	}
+	s.reg.Add(s.writeMetrics)
+	s.metrics = metrics.New(s.reg, slog.Default())
+	return s
 }
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /tables/{table}", s.createTable)
-	mux.HandleFunc("GET /tables/{table}", s.getTable)
-	mux.HandleFunc("/tables/{table}/items/{key}", s.item)
+	mux.Handle("GET /tables", s.auth(s.listTables))
+	mux.Handle("PUT /tables/{table}", s.auth(s.createTable))
+	mux.Handle("GET /tables/{table}", s.auth(s.getTable))
+	mux.Handle("/tables/{table}/items/{key}", s.auth(s.item))
+	mux.HandleFunc("GET /health", s.health)
+	return s.metrics.Wrap(mux)
+}
+
+func (s *server) internalRoutes() http.Handler {
+	mux := http.NewServeMux()
 	mux.HandleFunc("POST /internal/shards", s.registerShard)
 	mux.HandleFunc("GET /internal/shards", s.listShards)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.RLock()
-		replicas := 0
-		for _, g := range s.groups {
-			replicas += len(g.Replicas)
-		}
-		shards := len(s.groups)
-		s.mu.RUnlock()
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R})
-	})
+	mux.HandleFunc("GET /internal/targets", s.targets)
+	mux.Handle("GET /metrics", s.reg)
+	mux.HandleFunc("GET /health", s.health)
 	return mux
+}
+
+func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	replicas := 0
+	for _, g := range s.groups {
+		replicas += len(g.Replicas)
+	}
+	shards := len(s.groups)
+	s.mu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R})
+}
+
+func (s *server) auth(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
+			http.Error(w, "missing or wrong token", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	})
+}
+
+func (s *server) listTables(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	out := make([]Table, 0, len(s.tables))
+	for _, t := range s.tables {
+		out = append(out, t)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	writeJSON(w, http.StatusOK, out)
+}
+
+type targetGroup struct {
+	Targets []string          `json:"targets"`
+	Labels  map[string]string `json:"labels"`
+}
+
+func (s *server) targets(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	out := []targetGroup{}
+	for _, g := range s.groups {
+		for _, rep := range g.Replicas {
+			u, err := url.Parse(rep.Addr)
+			if err != nil || u.Host == "" {
+				continue
+			}
+			out = append(out, targetGroup{Targets: []string{u.Host}, Labels: map[string]string{"shard": g.ID, "replica": rep.Replica}})
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Labels["replica"] < out[j].Labels["replica"] })
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *server) writeMetrics(w io.Writer) {
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.groups))
+	for id := range s.groups {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	samples := make([]metrics.Sample, 0, len(ids))
+	for _, id := range ids {
+		alive := 0
+		for _, rep := range s.groups[id].Replicas {
+			if s.alive(rep) {
+				alive++
+			}
+		}
+		samples = append(samples, metrics.Sample{Labels: []string{"shard", id}, Value: float64(alive)})
+	}
+	s.mu.RUnlock()
+	metrics.WriteGauge(w, "kv_replicas_alive", "Replicas of a shard that sent a heartbeat in the last 6 s.", samples)
 }
 
 func (s *server) createTable(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +382,7 @@ func (s *server) write(w http.ResponseWriter, r *http.Request, g group, wq int) 
 		return
 	}
 	req.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+	req.Header.Set(metrics.TraceHeader, r.Header.Get(metrics.TraceHeader))
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -323,6 +415,7 @@ func (s *server) ask(r *http.Request, rep Replica) answer {
 	if err != nil {
 		return answer{replica: rep.Replica, err: err}
 	}
+	req.Header.Set(metrics.TraceHeader, r.Header.Get(metrics.TraceHeader))
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return answer{replica: rep.Replica, err: err}
@@ -452,12 +545,16 @@ func (s *server) localItem(w http.ResponseWriter, r *http.Request, table, key st
 
 func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 	var rep Replica
-	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil || rep.ID == "" || rep.Addr == "" {
+	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil || !validID.MatchString(rep.ID) || !validAddr(rep.Addr) {
 		http.Error(w, `body must be {"id": "shard-1", "replica": "shard-1-a", "role": "leader", "addr": "http://..."}`, http.StatusBadRequest)
 		return
 	}
 	if rep.Replica == "" {
 		rep.Replica = rep.ID
+	}
+	if !validID.MatchString(rep.Replica) {
+		http.Error(w, "replica must match "+validID.String(), http.StatusBadRequest)
+		return
 	}
 	if rep.Role == "" {
 		rep.Role = "leader"
@@ -490,6 +587,13 @@ func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 
 	s.ring.Add(ring.Shard{ID: rep.ID, Addr: rep.Addr})
 	writeJSON(w, http.StatusOK, rep)
+}
+
+var validID = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+func validAddr(addr string) bool {
+	u, err := url.Parse(addr)
+	return err == nil && u.Scheme == "http" && u.Host != "" && (u.Path == "" || u.Path == "/")
 }
 
 func (s *server) listShards(w http.ResponseWriter, r *http.Request) {

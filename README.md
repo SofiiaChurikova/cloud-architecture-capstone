@@ -6,32 +6,73 @@ Capstone for the Cloud Architectures course: a small DynamoDB-like key-value sto
 |---|---|
 | M1 - Infrastructure setup | done |
 | M2 - Sharding | done |
-| **M3 - Replication** | in progress |
-| M4 - Monitoring, failures, MCP | - |
+| M3 - Replication | done |
+| **M4 - Monitoring, failures, MCP** | in progress |
 | M5 - Production | - |
 
 ## What's where
 
 ```
-openspec/changes/m3-replication/   M3 proposal, specs, tasks (written before the code)
+openspec/changes/m4-monitoring-mcp/ M4 proposal, specs, tasks (written before the code)
+openspec/changes/m3-replication/   M3 change
 openspec/changes/m2-sharding/      M2 change
 openspec/changes/archive/          M1 change, archived
 openspec/specs/                    current specs
-docs/adr/                          architecture decisions (0001-0003 M1, 0004-0009 M2, 0010-0014 M3)
+docs/adr/                          architecture decisions (0001-0003 M1, 0004-0009 M2, 0010-0014 M3, 0015-0019 M4)
 api/openapi.yaml                   the API
 cmd/coordinator/                   coordinator: tables, ring, replica sets, quorum reads
 cmd/shard/                         one replica: leader or follower of a shard
+cmd/mcp/                           MCP server over stdio for AI agents
+internal/metrics/                  Prometheus metrics, trace IDs, JSON request logs
 internal/ring/                     consistent hashing ring (xxHash64, 128 vnodes)
 internal/wal/                      append-only log on disk (offsets, replay on start)
 internal/replica/                  leader (log + wait for W) and follower (pull from offset)
 internal/store/                    in-memory items with versions
 infra/network.yaml                 VPC stack (M1) + S3 endpoint (M2)
-infra/app.yaml                     coordinator + 2 shards x 3 replicas on EC2
+infra/app.yaml                     coordinator + 2 shards x 3 replicas + monitoring on EC2
+monitoring/                        Prometheus config, alert rules, Grafana dashboard
 infra/iam-readonly.yaml            read-only policy (M1, only validated)
 .github/workflows/pipeline.yml     build + deploy
 bench/                             YCSB binding and workload
-docs/m1/, docs/m2/, docs/m3/       reports, evidence, AI reviews
+docs/m1/ ... docs/m4/               reports, evidence, AI reviews
 ```
+
+## How to run M4
+
+### Locally
+
+Needs Go 1.22 (or Docker).
+
+```bash
+go test ./...
+docker compose up --build        # M3 cluster + Prometheus (:9090) + Grafana (:3000)
+                                 # (to curl 9080 from the host, add "9080:9080" to the coordinator ports)
+
+curl -i -X PUT localhost:8080/tables/users -d '{"partition_key":"id"}'
+curl -i -X PUT localhost:8080/tables/users/items/42 -d '{"id":"42"}'    # X-Trace-Id and X-Version (leader time) in the answer
+docker compose logs | grep <trace id>                                   # the same request in the coordinator and replica logs
+curl localhost:9080/metrics                                             # coordinator metrics (internal port)
+curl localhost:9080/internal/targets                                    # what Prometheus scrapes
+```
+
+Grafana: http://localhost:3000/d/kvstore. Alerts: http://localhost:9090/alerts. Stop a replica (`docker compose stop shard-1-c`) and `NodeDown`, `ShardMissingReplicas` and `ReplicationLag` fire in about a minute.
+
+With `API_TOKEN` set on the coordinator, `/tables` needs `Authorization: Bearer <token>`. `/internal/*` and `/metrics` are only on the internal port 9080, which in AWS only the replicas and the monitoring node can reach.
+
+MCP server for Claude Desktop: `docs/m4/mcp.md`.
+
+Output of my run: `docs/m4/evidence/local-run.md`.
+
+### In AWS
+
+New credentials in the repo secrets, and an `API_TOKEN` secret for the store. Push to `main`, the pipeline recreates `capstone-app`, now with 8 instances. The stack outputs have the coordinator, Prometheus and Grafana URLs.
+
+```bash
+curl http://<coordinator-ip>:8080/health                     # "shards":2,"replicas":6
+open http://<monitoring-ip>:3000/d/kvstore                   # dashboard
+```
+
+Budget: `docs/m4/budget.md`.
 
 ## How to run M3
 
@@ -181,16 +222,16 @@ Reports: [permissions](docs/m1/labrole.md), [quotas](docs/m1/quotas.md), [budget
 
 ## What changed since the last milestone
 
-- Every shard is a replica set now: 1 leader + 2 followers, 7 instances in total (ADR-0013).
-- The leader appends every write to an append-only log on disk, followers pull it from their offset and resync after a restart (ADR-0011, ADR-0012).
-- Every item has a version (the log offset), deletes are tombstones.
-- Quorum writes and reads with N=3, default W=2 and R=2, changeable per request with `?w=` / `?r=` (ADR-0010).
-- Reads are spread over all 3 replicas of a shard.
-- Replicas can reach each other on 8081 (followers pull from the leader).
-- Replicas send a heartbeat every 2 s. A replica without one for 6 s is down: reads skip it, a write to a dead leader gets `503` at once (ADR-0014).
-- The coordinator keeps tables in `$DATA_DIR/tables.json` and waits for all shards from `EXPECTED_SHARDS` before it takes requests (ADR-0014).
-- YCSB for different W / R against the M2 baseline in `docs/m3/benchmark.md`.
+- Coordinator and replicas expose Prometheus metrics on `/metrics`: requests by operation and status, latency histograms without `5xx` (p50/p95/p99), alive replicas per shard, keys and log offset per replica, replication lag per follower (ADR-0015).
+- The coordinator has a second port, 9080, for `/internal/*` and `/metrics`; only the replicas and the monitoring node can reach it. Replica IDs and addresses are checked (ADR-0019).
+- The leader refuses a log request from past the end of its log, so a wrong or fake follower can't count towards W.
+- Prometheus + Grafana on one more instance (8 of 9). Prometheus finds the replicas through `GET /internal/targets` on the coordinator. The dashboard and the alert rules are files in `monitoring/`.
+- Alerts: node down, a shard with fewer than 3 alive replicas, more than 0.5% `5xx`, read / write p99 above the SLO, replication lag above 5 s (ADR-0016).
+- Every request gets `X-Trace-Id`, the coordinator passes it to the replicas, and every service logs one JSON line per request with it (plus shard, replicas, version, and the reason for `5xx`).
+- The version of an item is the leader time in microseconds (always growing) instead of the log offset. Replicas and reads keep the greater version - last write wins (ADR-0017).
+- `GET /tables` lists the tables. With `API_TOKEN` set, `/tables` needs a bearer token.
+- `cmd/mcp`: MCP server over stdio with `list_tables`, `exists_item`, `read_item`, `create_item` (only new items), `delete_item` (only with `confirm: true`, at most 5 per session). Tables, overwrites, `w` / `r` and `/internal/*` are not exposed (ADR-0018).
 
 ## AI usage
 
-The spec and ADRs were written before the code. AI helped with explanations and drafts, and a separate AI reviewed the design - the reviews and my decisions are in `docs/m1/ai-review.md`, `docs/m2/ai-review.md` and `docs/m3/ai-review.md`.
+The spec and ADRs were written before the code. AI helped with explanations and drafts, and a separate AI reviewed the design - the reviews and my decisions are in `docs/m1/ai-review.md`, `docs/m2/ai-review.md`, `docs/m3/ai-review.md` and `docs/m4/ai-review.md`.

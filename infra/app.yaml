@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: M3 app - 1 coordinator in a public subnet, 2 shards x 3 replicas in the private subnets
+Description: M4 app - 1 coordinator and 1 monitoring node in public subnets, 2 shards x 3 replicas in the private subnets
 
 Parameters:
   NetworkStackName:
@@ -11,10 +11,19 @@ Parameters:
   ShardBinaryUrl:
     Type: String
     NoEcho: true
+  MonitoringConfigUrl:
+    Type: String
+    NoEcho: true
+    Description: monitoring/ folder as tar.gz (Prometheus config, alerts, Grafana dashboard)
+  ApiToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Token for the /tables API, empty = no token needed
   ClientCidr:
     Type: String
     Default: 0.0.0.0/0
-    Description: Who can call the coordinator API (port 8080)
+    Description: Who can call the coordinator API (8080) and open Prometheus (9090) and Grafana (3000)
   InstanceType:
     Type: String
     Default: t3.micro
@@ -72,9 +81,43 @@ Resources:
     Properties:
       GroupId: !Ref CoordinatorSecurityGroup
       IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
+      FromPort: 9080
+      ToPort: 9080
       SourceSecurityGroupId: !Ref ShardSecurityGroup
+
+  MonitoringSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Monitoring - Prometheus on 9090, Grafana on 3000
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9090
+          ToPort: 9090
+          CidrIp: !Ref ClientCidr
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: !Ref ClientCidr
+
+  CoordinatorFromMonitoring:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref CoordinatorSecurityGroup
+      IpProtocol: tcp
+      FromPort: 9080
+      ToPort: 9080
+      SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+
+  ShardFromMonitoring:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ShardSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8081
+      ToPort: 8081
+      SourceSecurityGroupId: !Ref MonitoringSecurityGroup
 
   Coordinator:
     Type: AWS::EC2::Instance
@@ -105,12 +148,15 @@ Resources:
           cat > /etc/systemd/system/coordinator.service <<EOT
           [Service]
           Environment=PORT=8080
+          Environment=INTERNAL_PORT=9080
           Environment=W=${WriteQuorum}
           Environment=R=${ReadQuorum}
           Environment=EXPECTED_SHARDS=shard-1,shard-2
           Environment=DATA_DIR=/var/lib/kvcoord
+          Environment=API_TOKEN=${ApiToken}
           ExecStart=/usr/local/bin/coordinator
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
@@ -151,9 +197,10 @@ Resources:
           Environment=ROLE=leader
           Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
-          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:9080
           ExecStart=/usr/local/bin/shard
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
@@ -195,9 +242,10 @@ Resources:
           Environment=LEADER_URL=http://${Shard1A.PrivateIp}:8081
           Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
-          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:9080
           ExecStart=/usr/local/bin/shard
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
@@ -239,9 +287,10 @@ Resources:
           Environment=LEADER_URL=http://${Shard1A.PrivateIp}:8081
           Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
-          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:9080
           ExecStart=/usr/local/bin/shard
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
@@ -282,9 +331,10 @@ Resources:
           Environment=ROLE=leader
           Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
-          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:9080
           ExecStart=/usr/local/bin/shard
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
@@ -326,9 +376,10 @@ Resources:
           Environment=LEADER_URL=http://${Shard2A.PrivateIp}:8081
           Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
-          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:9080
           ExecStart=/usr/local/bin/shard
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
@@ -370,14 +421,73 @@ Resources:
           Environment=LEADER_URL=http://${Shard2A.PrivateIp}:8081
           Environment=DATA_DIR=/var/lib/kvnode
           Environment=ADVERTISE_ADDR=http://$IP:8081
-          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:8080
+          Environment=COORDINATOR_URL=http://${Coordinator.PrivateIp}:9080
           ExecStart=/usr/local/bin/shard
           Restart=always
+          LogRateLimitIntervalSec=0
           [Install]
           WantedBy=multi-user.target
           EOT
           systemctl enable --now shard
 
+  Monitoring:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            VolumeSize: 8
+      SubnetId: !Select
+        - 1
+        - !Split
+          - ","
+          - Fn::ImportValue: !Sub "${NetworkStackName}-PublicSubnetIds"
+      SecurityGroupIds:
+        - !Ref MonitoringSecurityGroup
+      Tags:
+        - Key: Name
+          Value: monitoring
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          echo "${Coordinator.PrivateIp} coordinator" >> /etc/hosts
+          echo "127.0.0.1 prometheus" >> /etc/hosts
+          mkdir -p /opt/monitoring /opt/prometheus /opt/grafana /var/lib/prometheus /var/lib/grafana
+          curl -fsSL "${MonitoringConfigUrl}" | tar -xz -C /opt/monitoring
+          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v2.53.3/prometheus-2.53.3.linux-amd64.tar.gz | tar -xz -C /opt/prometheus --strip-components=1
+          curl -fsSL https://dl.grafana.com/oss/release/grafana-11.3.0.linux-amd64.tar.gz | tar -xz -C /opt/grafana --strip-components=1
+          cat > /etc/systemd/system/prometheus.service <<EOT
+          [Service]
+          ExecStart=/opt/prometheus/prometheus --config.file=/opt/monitoring/prometheus.yml --storage.tsdb.path=/var/lib/prometheus --storage.tsdb.retention.time=3d
+          Restart=always
+          LogRateLimitIntervalSec=0
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          cat > /etc/systemd/system/grafana.service <<EOT
+          [Service]
+          WorkingDirectory=/opt/grafana
+          Environment=GF_PATHS_PROVISIONING=/opt/monitoring/grafana/provisioning
+          Environment=GF_PATHS_DATA=/var/lib/grafana
+          Environment=GF_AUTH_ANONYMOUS_ENABLED=true
+          Environment=GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+          Environment=GF_AUTH_DISABLE_LOGIN_FORM=true
+          ExecStart=/opt/grafana/bin/grafana server --homepath /opt/grafana
+          Restart=always
+          LogRateLimitIntervalSec=0
+          [Install]
+          WantedBy=multi-user.target
+          EOT
+          systemctl enable --now prometheus grafana
+
 Outputs:
   CoordinatorUrl:
     Value: !Sub "http://${Coordinator.PublicIp}:8080"
+  PrometheusUrl:
+    Value: !Sub "http://${Monitoring.PublicIp}:9090"
+  GrafanaUrl:
+    Value: !Sub "http://${Monitoring.PublicIp}:3000/d/kvstore"
