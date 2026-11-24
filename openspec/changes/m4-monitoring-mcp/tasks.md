@@ -28,4 +28,4 @@
 
 - [x] 4.1 Budget for M4
 - [ ] 4.2 AI design review
-- [ ] 4.3 README
+- [x] 4.3 README

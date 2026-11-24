@@ -190,3 +190,25 @@ func TestProtocolOverStdio(t *testing.T) {
 		t.Fatalf("unknown method: %v", lines[2])
 	}
 }
+
+func TestSchemasAreValid(t *testing.T) {
+	s := newTestServer(t, "http://127.0.0.1:1", "")
+	b, _ := json.Marshal(s.tools)
+	var tools []map[string]any
+	json.Unmarshal(b, &tools)
+	for _, tl := range tools {
+		sc := tl["inputSchema"].(map[string]any)
+		if sc["type"] != "object" {
+			t.Fatalf("%s: schema type %v", tl["name"], sc["type"])
+		}
+		if _, ok := sc["required"].([]any); !ok {
+			t.Fatalf("%s: required must be a list, got %v", tl["name"], sc["required"])
+		}
+		props := sc["properties"].(map[string]any)
+		for _, r := range sc["required"].([]any) {
+			if _, ok := props[r.(string)]; !ok {
+				t.Fatalf("%s: required %q is not in properties", tl["name"], r)
+			}
+		}
+	}
+}

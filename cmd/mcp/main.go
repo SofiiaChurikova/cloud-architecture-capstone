@@ -149,6 +149,9 @@ func text(s string) map[string]any {
 }
 
 func schema(props map[string]any, required ...string) map[string]any {
+	if required == nil {
+		required = []string{}
+	}
 	return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 }
 
