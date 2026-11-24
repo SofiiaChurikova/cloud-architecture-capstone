@@ -22,8 +22,8 @@
 ## 3. AWS
 
 - [x] 3.1 `infra/app.yaml`: monitoring instance, security groups; pipeline uploads monitoring files
-- [ ] 3.2 Demo: dashboard, stop a node -> "node down" alert
-- [ ] 3.3 MCP from Claude Desktop against the AWS stack
+- [x] 3.2 Demo: dashboard, stop a node -> "node down" alert
+- [x] 3.3 MCP from Claude Desktop against the AWS stack
 
 ## 4. Defense
 

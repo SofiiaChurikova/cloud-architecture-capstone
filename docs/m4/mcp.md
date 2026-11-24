@@ -14,7 +14,7 @@
 
 Not exposed on purpose: creating or deleting tables, overwriting items, `w` / `r`, `/internal/*`.
 
-Every tool has annotations: `readOnlyHint` on list/exists/read, `destructiveHint` on delete. Claude Desktop uses them to ask me before a tool that changes data. `MCP_MAX_DELETES` changes the delete limit.
+Every tool has annotations: `readOnlyHint` on list/exists/read, `destructiveHint` on delete. A client may use them to ask the user, but in my demo Claude Desktop did not, so the limits that count are the ones in the server: no table or overwrite tools, one key per delete, at most 5 deletes per session (`MCP_MAX_DELETES`).
 
 Errors (missing table or item, wrong token, store down, delete without confirm, item exists, delete limit) come back as tool errors with a short message, so the agent can tell the user what happened. A `503` after the leader already wrote the item says so ("the leader already has it as version X"), so the agent checks before retrying. Numbers in items are kept exactly (no float64 round trip).
 

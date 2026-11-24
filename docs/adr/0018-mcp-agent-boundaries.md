@@ -31,7 +31,9 @@ What it **may not** do (not exposed at all):
 
 Why delete is allowed: M4 asks for DELETE, and deleting one key is something a user may really want from an agent ("remove test user 42"). It's limited to one key and a few per session, and a delete is a new version in the log (tombstone).
 
-`confirm: true` alone is not a human check - the model sets it itself, and a prompt injection can tell it to. The real check is in the MCP client: every tool has annotations (`readOnlyHint` for list/exists/read, `destructiveHint` for delete), and Claude Desktop asks the user before a tool that is not read-only, unless the user turned that off. `confirm` and the limit are a second line, if the client is set to allow everything.
+`confirm: true` is not a human check - the model sets it itself, and a prompt injection can tell it to. I saw this in the AWS demo: I wrote "delete item 100", the model called `delete_item` with `confirm: true`, and Claude Desktop did not show any approval window (`docs/m4/evidence/aws-demo.md`). Every tool has annotations (`readOnlyHint` for list/exists/read, `destructiveHint` for delete), but whether the client asks the user depends on the client and its settings, so I don't count on it.
+
+What really limits the agent is in the MCP server and doesn't depend on the model: no tools for tables or overwrites, one key per delete, and at most 5 deletes per session. A real human check would be MCP elicitation (the server asks the client to show a confirmation to the user) - next step.
 
 ## Consequences
 - (+) The agent can't do more than the five tools, whatever text it reads, and the worst it can do is delete 5 keys.
