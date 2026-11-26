@@ -55,6 +55,8 @@ type cluster struct {
 	internal *httptest.Server
 	nodes    map[string]*replica.Node
 	urls     map[string]*httptest.Server
+	ctx      context.Context
+	follow   bool
 }
 
 func newCluster(t *testing.T, shards []string, follow bool) *cluster {
@@ -63,35 +65,54 @@ func newCluster(t *testing.T, shards []string, follow bool) *cluster {
 	t.Cleanup(cancel)
 
 	srv := newServer()
-	c := &cluster{srv: srv, coord: httptest.NewServer(srv.routes()), internal: httptest.NewServer(srv.internalRoutes()), nodes: map[string]*replica.Node{}, urls: map[string]*httptest.Server{}}
+	srv.grace, srv.retryWait = 10*time.Millisecond, 10*time.Millisecond
+	c := &cluster{srv: srv, coord: httptest.NewServer(srv.routes()), internal: httptest.NewServer(srv.internalRoutes()),
+		nodes: map[string]*replica.Node{}, urls: map[string]*httptest.Server{}, ctx: ctx, follow: follow}
 	t.Cleanup(c.coord.Close)
 	t.Cleanup(c.internal.Close)
 
 	for _, sh := range shards {
-		var leaderURL string
-		for i, suffix := range []string{"a", "b", "c"} {
-			id := sh + "-" + suffix
-			l, _ := wal.Open("")
-			n := replica.New(replica.Config{ID: id, Shard: sh, Leader: i == 0, Log: l})
-			n.AckTimeout = 200 * time.Millisecond
-			mux := http.NewServeMux()
-			n.Routes(mux)
-			srv := httptest.NewServer(mux)
-			t.Cleanup(srv.Close)
-			c.nodes[id], c.urls[id] = n, srv
-
-			role := "follower"
-			if i == 0 {
-				role, leaderURL = "leader", srv.URL
-			} else if follow {
-				go n.Follow(ctx, leaderURL, http.DefaultClient)
-			}
-			expect(t, do(t, "POST", c.internal.URL+"/internal/shards",
-				fmt.Sprintf(`{"id":"%s","replica":"%s","role":"%s","addr":"%s"}`, sh, id, role, srv.URL)), http.StatusOK)
-		}
+		c.addShard(t, sh)
 	}
+	c.waitIdle(t)
 	expect(t, do(t, "PUT", c.coord.URL+"/tables/users", `{"partition_key":"id"}`), http.StatusOK)
 	return c
+}
+
+func (c *cluster) addShard(t *testing.T, sh string) {
+	t.Helper()
+	var leaderURL string
+	for i, suffix := range []string{"a", "b", "c"} {
+		id := sh + "-" + suffix
+		l, _ := wal.Open("")
+		n := replica.New(replica.Config{ID: id, Shard: sh, Leader: i == 0, Log: l})
+		n.AckTimeout = 200 * time.Millisecond
+		mux := http.NewServeMux()
+		n.Routes(mux)
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		c.nodes[id], c.urls[id] = n, srv
+
+		role := "follower"
+		if i == 0 {
+			role, leaderURL = "leader", srv.URL
+		} else if c.follow {
+			go n.Follow(c.ctx, leaderURL, http.DefaultClient)
+		}
+		expect(t, do(t, "POST", c.internal.URL+"/internal/shards",
+			fmt.Sprintf(`{"id":"%s","replica":"%s","role":"%s","addr":"%s"}`, sh, id, role, srv.URL)), http.StatusOK)
+	}
+}
+
+func (c *cluster) waitIdle(t *testing.T) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		if c.srv.status().State == "idle" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("shard move still running: %+v", c.srv.status())
 }
 
 func TestReplicatedWritesAndReads(t *testing.T) {
@@ -390,4 +411,15 @@ func TestTargetsAndMetrics(t *testing.T) {
 	if !strings.Contains(body(), `kv_replicas_alive{shard="shard-1"} 0`) {
 		t.Fatal("replicas without heartbeats are still counted as alive")
 	}
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timeout waiting for " + what)
 }

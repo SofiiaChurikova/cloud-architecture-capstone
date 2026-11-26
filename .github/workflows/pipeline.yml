@@ -17,10 +17,13 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p out
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o out/coordinator ./cmd/coordinator
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o out/shard ./cmd/shard
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o out/mcp-darwin-amd64 ./cmd/mcp
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o out/mcp-darwin-arm64 ./cmd/mcp
+          V="-X main.version=${GITHUB_SHA::7}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$V" -o out/coordinator ./cmd/coordinator
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$V" -o out/shard ./cmd/shard
+          for c in mcp opsmcp autoscaler; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o out/$c-darwin-amd64 ./cmd/$c
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o out/$c-darwin-arm64 ./cmd/$c
+          done
           tar -czf out/monitoring.tar.gz -C monitoring .
       - uses: actions/upload-artifact@v4
         with:
@@ -54,9 +57,9 @@ jobs:
           aws s3 cp out/shard "s3://$bucket/$GITHUB_SHA/shard"
           aws s3 cp out/monitoring.tar.gz "s3://$bucket/$GITHUB_SHA/monitoring.tar.gz"
           {
-            echo "COORDINATOR_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/coordinator" --expires-in 3600)"
-            echo "SHARD_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/shard" --expires-in 3600)"
-            echo "MONITORING_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/monitoring.tar.gz" --expires-in 3600)"
+            echo "COORDINATOR_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/coordinator" --expires-in 14400)"
+            echo "SHARD_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/shard" --expires-in 14400)"
+            echo "MONITORING_URL=$(aws s3 presign "s3://$bucket/$GITHUB_SHA/monitoring.tar.gz" --expires-in 14400)"
           } >> "$GITHUB_ENV"
 
       - name: Deploy network stack

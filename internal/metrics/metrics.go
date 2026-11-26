@@ -18,7 +18,7 @@ import (
 
 const TraceHeader = "X-Trace-Id"
 
-var Buckets = []float64{.0005, .001, .0025, .005, .01, .02, .05, .1, .25, .5, 1, 2.5}
+var Buckets = []float64{.0005, .001, .0025, .005, .01, .02, .05, .06, .1, .25, .5, 1, 2.5}
 
 type Registry struct {
 	mu   sync.Mutex

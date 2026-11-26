@@ -47,6 +47,33 @@ func (r *Ring) Add(s Shard) {
 	sort.Slice(r.points, func(i, j int) bool { return r.points[i] < r.points[j] })
 }
 
+func (r *Ring) Remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.shards[id]; !ok {
+		return
+	}
+	delete(r.shards, id)
+	points := r.points[:0]
+	for _, p := range r.points {
+		if r.owner[p] == id {
+			delete(r.owner, p)
+			continue
+		}
+		points = append(points, p)
+	}
+	r.points = points
+}
+
+func Of(shards []Shard) *Ring {
+	r := New()
+	for _, s := range shards {
+		r.Add(s)
+	}
+	return r
+}
+
 func (r *Ring) Get(key string) (Shard, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

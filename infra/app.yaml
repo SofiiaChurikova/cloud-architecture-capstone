@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: M4 app - 1 coordinator and 1 monitoring node in public subnets, 2 shards x 3 replicas in the private subnets
+Description: M5 app - 1 coordinator and 1 monitoring node in public subnets, 1 or 2 shards x 3 replicas in the private subnets
 
 Parameters:
   NetworkStackName:
@@ -38,9 +38,17 @@ Parameters:
     Default: 2
     AllowedValues: [1, 2, 3]
     Description: Default R, how many replicas a read asks
+  ShardCount:
+    Type: Number
+    Default: 2
+    AllowedValues: [1, 2]
+    Description: How many shards (3 instances each). The autoscaler changes it (ADR-0020)
   AmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  TwoShards: !Equals [!Ref ShardCount, 2]
 
 Resources:
   CoordinatorSecurityGroup:
@@ -151,7 +159,8 @@ Resources:
           Environment=INTERNAL_PORT=9080
           Environment=W=${WriteQuorum}
           Environment=R=${ReadQuorum}
-          Environment=EXPECTED_SHARDS=shard-1,shard-2
+          Environment=EXPECTED_SHARDS=shard-1
+          Environment=ALLOWED_SHARDS=shard-1,shard-2
           Environment=DATA_DIR=/var/lib/kvcoord
           Environment=API_TOKEN=${ApiToken}
           ExecStart=/usr/local/bin/coordinator
@@ -298,6 +307,7 @@ Resources:
 
   Shard2A:
     Type: AWS::EC2::Instance
+    Condition: TwoShards
     Properties:
       ImageId: !Ref AmiId
       InstanceType: !Ref InstanceType
@@ -342,6 +352,7 @@ Resources:
 
   Shard2B:
     Type: AWS::EC2::Instance
+    Condition: TwoShards
     Properties:
       ImageId: !Ref AmiId
       InstanceType: !Ref InstanceType
@@ -387,6 +398,7 @@ Resources:
 
   Shard2C:
     Type: AWS::EC2::Instance
+    Condition: TwoShards
     Properties:
       ImageId: !Ref AmiId
       InstanceType: !Ref InstanceType

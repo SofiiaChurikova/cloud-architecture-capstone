@@ -17,11 +17,14 @@ import (
 	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/wal"
 )
 
+var version = "dev"
+
 type registration struct {
 	ID      string `json:"id"`
 	Replica string `json:"replica"`
 	Role    string `json:"role"`
 	Addr    string `json:"addr"`
+	Offset  uint64 `json:"offset"`
 }
 
 func main() {
@@ -60,22 +63,27 @@ func main() {
 	reg := &metrics.Registry{}
 	reg.Add(n.WriteMetrics)
 	mux.Handle("GET /metrics", reg)
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"service": "shard", "replica": id, "version": version})
+	})
 	handler := metrics.New(reg, logger).Wrap(mux)
 
 	if !isLeader {
 		go n.Follow(context.Background(), leader, &http.Client{Timeout: 10 * time.Second})
 	}
-	go register(coordinator, registration{ID: shard, Replica: id, Role: role, Addr: addr})
+	go register(coordinator, registration{ID: shard, Replica: id, Role: role, Addr: addr}, l.Last)
 
 	log.Printf("%s (%s of %s) listening on :%s", id, role, shard, port)
 	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
 
-func register(coordinator string, me registration) {
-	body, _ := json.Marshal(me)
+func register(coordinator string, me registration, offset func() uint64) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	ok := false
 	for {
+		me.Offset = offset()
+		body, _ := json.Marshal(me)
 		resp, err := client.Post(coordinator+"/internal/shards", "application/json", bytes.NewReader(body))
 		if err == nil {
 			resp.Body.Close()

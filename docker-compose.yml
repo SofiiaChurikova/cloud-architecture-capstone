@@ -6,7 +6,7 @@ services:
   coordinator:
     build: .
     command: ["coordinator"]
-    environment: {EXPECTED_SHARDS: "shard-1,shard-2", DATA_DIR: /data}
+    environment: {EXPECTED_SHARDS: shard-1, ALLOWED_SHARDS: "shard-1,shard-2", DATA_DIR: /data}
     ports:
       - "8080:8080"
 

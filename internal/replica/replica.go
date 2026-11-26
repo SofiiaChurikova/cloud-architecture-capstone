@@ -55,12 +55,21 @@ func New(cfg Config) *Node {
 func (n *Node) Store() *store.Store { return n.store }
 
 func (n *Node) apply(e wal.Entry) {
+	if e.Purge {
+		n.store.Purge(e.Table, e.Key, e.Version)
+		return
+	}
 	n.store.Apply(e.Table, e.Key, store.Item{Value: e.Value, Version: e.Version, Deleted: e.Deleted})
 }
 
 func (n *Node) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/items/{table}/{key}", n.item)
 	mux.HandleFunc("GET /internal/log", n.serveLog)
+	mux.HandleFunc("GET /internal/dump", n.leaderOnly(n.dump))
+	mux.HandleFunc("GET /internal/version", n.leaderOnly(n.maxVersion))
+	mux.HandleFunc("POST /internal/floor", n.leaderOnly(n.floor))
+	mux.HandleFunc("POST /internal/import", n.leaderOnly(n.importItems))
+	mux.HandleFunc("POST /internal/purge", n.leaderOnly(n.purge))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		role := "follower"
 		if n.cfg.Leader {
@@ -140,6 +149,107 @@ func (n *Node) item(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "PUT, GET, HEAD, DELETE")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+type Item struct {
+	Table   string          `json:"table"`
+	Key     string          `json:"key"`
+	Value   json.RawMessage `json:"value,omitempty"`
+	Version uint64          `json:"version"`
+	Deleted bool            `json:"deleted,omitempty"`
+}
+
+func (n *Node) leaderOnly(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !n.cfg.Leader {
+			http.Error(w, "not the leader", http.StatusConflict)
+			return
+		}
+		h(w, r)
+	}
+}
+
+func (n *Node) dump(w http.ResponseWriter, r *http.Request) {
+	all := n.store.All()
+	items := make([]Item, 0, len(all))
+	for _, e := range all {
+		items = append(items, Item{Table: e.Table, Key: e.Key, Value: e.Value, Version: e.Version, Deleted: e.Deleted})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(items)
+}
+
+func (n *Node) maxVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]uint64{"version": n.cfg.Log.MaxVersion()})
+}
+
+func (n *Node) floor(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version uint64 `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, `body must be {"version": N}`, http.StatusBadRequest)
+		return
+	}
+	n.cfg.Log.Floor(body.Version)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (n *Node) importItems(w http.ResponseWriter, r *http.Request) {
+	var items []Item
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(&items); err != nil {
+		http.Error(w, "body must be a list of items", http.StatusBadRequest)
+		return
+	}
+	n.writeEntries(w, r, items, false)
+}
+
+func (n *Node) purge(w http.ResponseWriter, r *http.Request) {
+	var items []Item
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(&items); err != nil {
+		http.Error(w, "body must be a list of items", http.StatusBadRequest)
+		return
+	}
+	n.writeEntries(w, r, items, true)
+}
+
+func (n *Node) writeEntries(w http.ResponseWriter, r *http.Request, items []Item, purge bool) {
+	need := 1
+	if v, err := strconv.Atoi(r.URL.Query().Get("w")); err == nil && v > 1 {
+		need = v
+	}
+	var todo []wal.Entry
+	for _, it := range items {
+		old, ok := n.store.Get(it.Table, it.Key)
+		if purge {
+			if !ok || old.Version > it.Version {
+				continue
+			}
+		} else if ok && old.Version >= it.Version {
+			continue
+		}
+		e := wal.Entry{Table: it.Table, Key: it.Key, Version: it.Version, Purge: purge}
+		if !purge {
+			e.Value, e.Deleted = it.Value, it.Deleted
+		}
+		todo = append(todo, e)
+	}
+	done, err := n.cfg.Log.Import(todo)
+	if err != nil {
+		http.Error(w, "log write failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, e := range done {
+		n.apply(e)
+	}
+	written := len(done)
+	if got := n.waitAcks(r.Context(), n.cfg.Log.Last(), need); got < need {
+		http.Error(w, fmt.Sprintf("only %d of %d replicas confirmed", got, need), http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"written": written})
 }
 
 func (n *Node) count(offset uint64) int {
