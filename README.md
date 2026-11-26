@@ -7,8 +7,8 @@ Capstone for the Cloud Architectures course: a small DynamoDB-like key-value sto
 | M1 - Infrastructure setup | done |
 | M2 - Sharding | done |
 | M3 - Replication | done |
-| **M4 - Monitoring, failures, MCP** | in progress |
-| M5 - Production | - |
+| M4 - Monitoring, failures, MCP | done |
+| **M5 - Production** | in progress |
 
 ## What's where
 
