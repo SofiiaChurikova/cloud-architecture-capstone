@@ -1,9 +1,9 @@
 openapi: 3.0.3
 info:
   title: KV store - coordinator API
-  version: "m4"
+  version: "m5"
   description: >-
-    Public API of the key-value store (M4). Clients talk only to the coordinator.
+    Public API of the key-value store (M5). Clients talk only to the coordinator.
     The ring picks the shard, writes go to the leader of the shard,
     reads ask R replicas of the shard and return the newest version (last write wins).
     When the coordinator has API_TOKEN set, every /tables request needs
@@ -152,6 +152,62 @@ paths:
         "503":
           description: The shards are not registered yet, the leader is down, or fewer than W replicas confirmed (the write can still be in the leader log)
 
+  /admin/shards/{id}/drain:
+    post:
+      summary: Move all keys of a shard to the other shards and take it off the ring (the autoscaler calls it before removing shard instances)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: shard-2
+      responses:
+        "202":
+          description: The move started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Migration"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: The shard is not on the ring
+        "409":
+          description: Another move is running, or it is the last shard
+
+  /admin/migration:
+    get:
+      summary: State of the current shard move and the last finished one
+      responses:
+        "200":
+          description: Move state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Migration"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /version:
+    get:
+      summary: Build version (git commit), also on the replicas and the internal port
+      security: []
+      responses:
+        "200":
+          description: Version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                    example: coordinator
+                  version:
+                    type: string
+                    example: 3f2a9c1
+
   /internal/targets:
     get:
       summary: Replicas for Prometheus (HTTP service discovery format), internal port 9080 only
@@ -211,7 +267,7 @@ paths:
 
   /health:
     get:
-      summary: Health check
+      summary: Health check - shards on the ring, registered replicas, move state, version
       security: []
       responses:
         "200":
@@ -294,10 +350,29 @@ components:
         addr:
           type: string
           example: http://10.20.16.10:8081
+        offset:
+          type: integer
+          description: Last offset in the replica's log. A removed shard ID is accepted again only with offset 0
         alive:
           type: boolean
           readOnly: true
           description: false if the replica sent no heartbeat for 6 s
+    Migration:
+      type: object
+      properties:
+        state:
+          type: string
+          enum: [idle, adding, draining]
+        shard:
+          type: string
+          example: shard-2
+        copied:
+          type: integer
+        total:
+          type: integer
+        last:
+          type: object
+          description: The last finished move (same fields)
     Shard:
       type: object
       properties:

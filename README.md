@@ -13,29 +13,64 @@ Capstone for the Cloud Architectures course: a small DynamoDB-like key-value sto
 ## What's where
 
 ```
-openspec/changes/m4-monitoring-mcp/ M4 proposal, specs, tasks (written before the code)
+openspec/changes/m5-scaling-rebalancing/ M5 proposal, specs, tasks (written before the code)
+openspec/changes/m4-monitoring-mcp/ M4 change
 openspec/changes/m3-replication/   M3 change
 openspec/changes/m2-sharding/      M2 change
 openspec/changes/archive/          M1 change, archived
 openspec/specs/                    current specs
-docs/adr/                          architecture decisions (0001-0003 M1, 0004-0009 M2, 0010-0014 M3, 0015-0019 M4)
+docs/adr/                          architecture decisions (0001-0003 M1, 0004-0009 M2, 0010-0014 M3, 0015-0019 M4, 0020-0022 M5)
 api/openapi.yaml                   the API
 cmd/coordinator/                   coordinator: tables, ring, replica sets, quorum reads
 cmd/shard/                         one replica: leader or follower of a shard
 cmd/mcp/                           MCP server over stdio for AI agents
+cmd/opsmcp/                        read-only MCP server for the ops agent (alerts, metrics, cluster)
+cmd/autoscaler/                    scales shards on write p99 (runs on my laptop)
+internal/mcpserver/                MCP JSON-RPC over stdio, shared by cmd/mcp and cmd/opsmcp
 internal/metrics/                  Prometheus metrics, trace IDs, JSON request logs
 internal/ring/                     consistent hashing ring (xxHash64, 128 vnodes)
 internal/wal/                      append-only log on disk (offsets, replay on start)
 internal/replica/                  leader (log + wait for W) and follower (pull from offset)
 internal/store/                    in-memory items with versions
 infra/network.yaml                 VPC stack (M1) + S3 endpoint (M2)
-infra/app.yaml                     coordinator + 2 shards x 3 replicas + monitoring on EC2
+infra/app.yaml                     coordinator + 1 or 2 shards x 3 replicas (ShardCount) + monitoring on EC2
 monitoring/                        Prometheus config, alert rules, Grafana dashboard
 infra/iam-readonly.yaml            read-only policy (M1, only validated)
 .github/workflows/pipeline.yml     build + deploy
 bench/                             YCSB binding and workload
-docs/m1/ ... docs/m4/               reports, evidence, AI reviews
+docs/m1/ ... docs/m5/               reports, evidence, AI reviews
 ```
+
+## How to run M5
+
+### Locally
+
+Needs Go 1.22.
+
+```bash
+go test ./...
+docker compose up --build                       # coordinator + shard-1 + shard-2 + Prometheus + Grafana
+
+# 1000 keys, then take shard-2 away and look at the keys per shard (Grafana "Keys per shard")
+curl -X POST -H "Authorization: Bearer $TOKEN" localhost:8080/admin/shards/shard-2/drain
+curl -H "Authorization: Bearer $TOKEN" localhost:8080/admin/migration    # draining -> idle, last move: copied/total
+curl localhost:8080/health                                               # "shards":1
+curl localhost:8080/version
+```
+
+Starting the shard-2 containers again with empty data puts shard-2 back on the ring and moves its keys to it. Output of my run: `docs/m5/evidence/local-run.md`.
+
+### In AWS
+
+The pipeline deploys the stack with `ShardCount=2` (8 instances). Then on my laptop, with the lab credentials (`AWS_PROFILE=aws-sandbox`):
+
+```bash
+KV_TOKEN=$TOKEN ./bin/autoscaler --prometheus http://<monitoring-ip>:9090 --coordinator http://<coordinator-ip>:8080
+```
+
+It goes down to 1 shard after 5 minutes without load and back to 2 when write p99 is above 60 ms for 2 minutes (ADR-0020). `--dry-run` only logs the decisions.
+
+Ops agent in Claude Desktop: `docs/m5/ops-agent.md`. Benchmark: `docs/m5/benchmark.md`. Budget: `docs/m5/budget.md`.
 
 ## How to run M4
 
@@ -222,16 +257,14 @@ Reports: [permissions](docs/m1/labrole.md), [quotas](docs/m1/quotas.md), [budget
 
 ## What changed since the last milestone
 
-- Coordinator and replicas expose Prometheus metrics on `/metrics`: requests by operation and status, latency histograms without `5xx` (p50/p95/p99), alive replicas per shard, keys and log offset per replica, replication lag per follower (ADR-0015).
-- The coordinator has a second port, 9080, for `/internal/*` and `/metrics`; only the replicas and the monitoring node can reach it. Replica IDs and addresses are checked (ADR-0019).
-- The leader refuses a log request from past the end of its log, so a wrong or fake follower can't count towards W.
-- Prometheus + Grafana on one more instance (8 of 9). Prometheus finds the replicas through `GET /internal/targets` on the coordinator. The dashboard and the alert rules are files in `monitoring/`.
-- Alerts: node down, a shard with fewer than 3 alive replicas, more than 0.5% `5xx`, read / write p99 above the SLO, replication lag above 5 s (ADR-0016).
-- Every request gets `X-Trace-Id`, the coordinator passes it to the replicas, and every service logs one JSON line per request with it (plus shard, replicas, version, and the reason for `5xx`).
-- The version of an item is the leader time in microseconds (always growing) instead of the log offset. Replicas and reads keep the greater version - last write wins (ADR-0017).
-- `GET /tables` lists the tables. With `API_TOKEN` set, `/tables` needs a bearer token.
-- `cmd/mcp`: MCP server over stdio with `list_tables`, `exists_item`, `read_item`, `create_item` (only new items), `delete_item` (only with `confirm: true`, at most 5 per session). Tables, overwrites, `w` / `r` and `/internal/*` are not exposed (ADR-0018).
+- Shards can be added and removed while the store runs. A new shard goes on the ring and the coordinator moves to it only the keys that now belong to it; during the move writes go to the new owner and reads ask the new owner first, then the old one. `POST /admin/shards/{id}/drain` does the same in the other direction (ADR-0021).
+- The new owner never gives a version below the old shard's greatest version, so a write during a move always beats the copy of the old value.
+- A removed shard can't come back from its old replicas; the same ID is accepted again only from replicas with an empty log.
+- The app stack has `ShardCount` (1 or 2); shard-2 exists only when it is 2. `cmd/autoscaler` changes it on write p99 (> 60 ms for 2 min: up; < 20 ms or no traffic for 5 min: drain + down; 5 min cooldown) (ADR-0020).
+- `cmd/opsmcp`: read-only MCP server for an ops agent - alerts, PromQL, cluster state; it suggests scale up / down / rebalance and can't do anything (ADR-0022).
+- `/version` on the coordinator and replicas (git commit from the pipeline); `/health` shows shards on the ring and the move state.
+- Dashboard: shards on the ring, active nodes, shard move progress.
 
 ## AI usage
 
-The spec and ADRs were written before the code. AI helped with explanations and drafts, and a separate AI reviewed the design - the reviews and my decisions are in `docs/m1/ai-review.md`, `docs/m2/ai-review.md`, `docs/m3/ai-review.md` and `docs/m4/ai-review.md`.
+The spec and ADRs were written before the code. AI helped with explanations and drafts, and a separate AI reviewed the design - the reviews and my decisions are in `docs/m1/ai-review.md`, `docs/m2/ai-review.md`, `docs/m3/ai-review.md`, `docs/m4/ai-review.md` and `docs/m5/ai-review.md`.

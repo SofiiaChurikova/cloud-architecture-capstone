@@ -2,6 +2,7 @@ package replica
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -243,5 +244,93 @@ func TestReplacedFollowerStartsFromZero(t *testing.T) {
 	leader.setAck("s1-b", 0)
 	if lag := leader.Lag(time.Now())["s1-b"]; lag.Entries != 3 {
 		t.Fatalf("a follower that came back empty shows %d entries behind, want 3", lag.Entries)
+	}
+}
+
+func postJSON(t *testing.T, url, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp
+}
+
+func TestImportKeepsVersionsAndReplicates(t *testing.T) {
+	leader := New(Config{ID: "s2-a", Shard: "s2", Leader: true, Log: memLog()})
+	srv := start(t, leader)
+	f := New(Config{ID: "s2-b", Shard: "s2", Log: memLog()})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.Follow(ctx, srv.URL, http.DefaultClient)
+
+	put(t, srv.URL+"/internal/items/users/new", `{"v":"newer"}`)
+	newer, _ := leader.Store().Get("users", "new")
+
+	body := fmt.Sprintf(`[{"table":"users","key":"a","value":{"v":1},"version":500},
+		{"table":"users","key":"gone","version":600,"deleted":true},
+		{"table":"users","key":"new","value":{"v":"old copy"},"version":%d}]`, newer.Version-1)
+	resp, err := http.Post(srv.URL+"/internal/import?w=2", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]int
+	json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || out["written"] != 2 {
+		t.Fatalf("import: %d %v, want 200 and 2 written (the old copy of new is skipped)", resp.StatusCode, out)
+	}
+	for _, n := range []*Node{leader, f} {
+		if it, _ := n.Store().Get("users", "a"); it.Version != 500 {
+			t.Fatalf("%s: imported version %d, want 500", n.cfg.ID, it.Version)
+		}
+		if it, _ := n.Store().Get("users", "gone"); !it.Deleted {
+			t.Fatalf("%s: imported delete missing", n.cfg.ID)
+		}
+	}
+	if it, _ := leader.Store().Get("users", "new"); string(it.Value) != `{"v":"newer"}` {
+		t.Fatalf("the old copy replaced a newer write: %s", it.Value)
+	}
+}
+
+func TestPurgeDropsOnlyUnchangedKeys(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	srv := start(t, leader)
+	put(t, srv.URL+"/internal/items/users/a", `{"v":1}`)
+	put(t, srv.URL+"/internal/items/users/b", `{"v":1}`)
+	a, _ := leader.Store().Get("users", "a")
+	b, _ := leader.Store().Get("users", "b")
+	put(t, srv.URL+"/internal/items/users/b", `{"v":2}`)
+
+	postJSON(t, srv.URL+"/internal/purge", fmt.Sprintf(`[{"table":"users","key":"a","version":%d},{"table":"users","key":"b","version":%d}]`, a.Version, b.Version))
+	if _, ok := leader.Store().Get("users", "a"); ok {
+		t.Fatal("a was not purged")
+	}
+	if _, ok := leader.Store().Get("users", "b"); !ok {
+		t.Fatal("b was changed after the dump and still got purged")
+	}
+	if leader.Store().Len() != 1 {
+		t.Fatalf("keys %d, want 1", leader.Store().Len())
+	}
+}
+
+func TestFloorAndLeaderOnly(t *testing.T) {
+	leader := New(Config{ID: "s1-a", Shard: "s1", Leader: true, Log: memLog()})
+	srv := start(t, leader)
+	if resp := postJSON(t, srv.URL+"/internal/floor", `{"version":9000}`); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("floor: %d", resp.StatusCode)
+	}
+	put(t, srv.URL+"/internal/items/users/a", `{"v":1}`)
+	if it, _ := leader.Store().Get("users", "a"); it.Version <= 9000 {
+		t.Fatalf("version %d after floor 9000", it.Version)
+	}
+	f := start(t, New(Config{ID: "s1-b", Shard: "s1", Log: memLog()}))
+	for _, p := range []string{"/internal/dump", "/internal/version"} {
+		resp, _ := http.Get(f.URL + p)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("%s on a follower: %d, want 409", p, resp.StatusCode)
+		}
 	}
 }

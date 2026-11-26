@@ -18,6 +18,7 @@ type Entry struct {
 	Key     string          `json:"key"`
 	Value   json.RawMessage `json:"value,omitempty"`
 	Deleted bool            `json:"deleted,omitempty"`
+	Purge   bool            `json:"purge,omitempty"`
 }
 
 type Log struct {
@@ -85,6 +86,28 @@ func (l *Log) Append(e Entry) (Entry, error) {
 		return Entry{}, err
 	}
 	return e, nil
+}
+
+func (l *Log) Import(e Entry) (Entry, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e.Offset = uint64(len(l.entries)) + 1
+	if err := l.write([]Entry{e}); err != nil {
+		return Entry{}, err
+	}
+	return e, nil
+}
+
+func (l *Log) Floor(version uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.version = max(l.version, version)
+}
+
+func (l *Log) MaxVersion() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.version
 }
 
 func (l *Log) AppendAt(batch []Entry) error {

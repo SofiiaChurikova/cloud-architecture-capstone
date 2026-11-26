@@ -3,6 +3,7 @@ package ring
 import (
 	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 )
 
@@ -58,5 +59,32 @@ func TestAddSameShardTwice(t *testing.T) {
 	}
 	if s, _ := r.Get("x"); s.Addr != "http://new" {
 		t.Fatalf("address not updated: %s", s.Addr)
+	}
+}
+
+func TestRemoveMovesOnlyThatShardsKeys(t *testing.T) {
+	two := Of([]Shard{{ID: "shard-1"}, {ID: "shard-2"}})
+	one := Of([]Shard{{ID: "shard-1"}, {ID: "shard-2"}})
+	one.Remove("shard-2")
+
+	moved, stayed := 0, 0
+	for i := 0; i < 10000; i++ {
+		k := Key("users", strconv.Itoa(i))
+		a, _ := two.Get(k)
+		b, _ := one.Get(k)
+		if b.ID != "shard-1" {
+			t.Fatalf("key %s still maps to %s after remove", k, b.ID)
+		}
+		if a.ID == "shard-2" {
+			moved++
+		} else {
+			stayed++
+		}
+	}
+	if moved < 3000 || stayed < 3000 {
+		t.Fatalf("moved %d, stayed %d, want about half each", moved, stayed)
+	}
+	if len(one.Shards()) != 1 {
+		t.Fatalf("shards %v", one.Shards())
 	}
 }

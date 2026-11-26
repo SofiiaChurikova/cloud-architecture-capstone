@@ -33,6 +33,34 @@ func (s *Store) Apply(table, key string, it Item) bool {
 	return true
 }
 
+func (s *Store) Purge(table, key string, version uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.items[table][key]; ok && old.Version <= version {
+		delete(s.items[table], key)
+		return true
+	}
+	return false
+}
+
+type Entry struct {
+	Table string
+	Key   string
+	Item
+}
+
+func (s *Store) All() []Entry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []Entry
+	for t, items := range s.items {
+		for k, it := range items {
+			out = append(out, Entry{Table: t, Key: k, Item: it})
+		}
+	}
+	return out
+}
+
 func (s *Store) Get(table, key string) (Item, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

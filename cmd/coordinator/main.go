@@ -27,6 +27,8 @@ import (
 
 const N = 3
 
+var version = "dev"
+
 func main() {
 	port := env("PORT", "8080")
 	internalPort := env("INTERNAL_PORT", "9080")
@@ -58,6 +60,7 @@ type Replica struct {
 	Replica string `json:"replica"`
 	Role    string `json:"role"`
 	Addr    string `json:"addr"`
+	Offset  uint64 `json:"offset"`
 	Alive   bool   `json:"alive"`
 
 	seen time.Time
@@ -100,6 +103,13 @@ type server struct {
 
 	reg     *metrics.Registry
 	metrics *metrics.HTTP
+
+	mig        *migration
+	lastMove   *migrationStatus
+	removed    map[string]bool
+	grace      time.Duration
+	retryWait  time.Duration
+	moveClient *http.Client
 }
 
 func newServer() *server {
@@ -120,7 +130,11 @@ func newServer() *server {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		reg: &metrics.Registry{},
+		reg:        &metrics.Registry{},
+		removed:    map[string]bool{},
+		grace:      5 * time.Second,
+		retryWait:  time.Second,
+		moveClient: &http.Client{Timeout: time.Minute},
 	}
 	s.reg.Add(s.writeMetrics)
 	s.metrics = metrics.New(s.reg, slog.Default())
@@ -133,7 +147,10 @@ func (s *server) routes() http.Handler {
 	mux.Handle("PUT /tables/{table}", s.auth(s.createTable))
 	mux.Handle("GET /tables/{table}", s.auth(s.getTable))
 	mux.Handle("/tables/{table}/items/{key}", s.auth(s.item))
+	mux.Handle("POST /admin/shards/{id}/drain", s.auth(s.drain))
+	mux.Handle("GET /admin/migration", s.auth(s.migrationState))
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /version", s.versionInfo)
 	return s.metrics.Wrap(mux)
 }
 
@@ -144,7 +161,12 @@ func (s *server) internalRoutes() http.Handler {
 	mux.HandleFunc("GET /internal/targets", s.targets)
 	mux.Handle("GET /metrics", s.reg)
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /version", s.versionInfo)
 	return mux
+}
+
+func (s *server) versionInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"service": "coordinator", "version": version})
 }
 
 func (s *server) health(w http.ResponseWriter, r *http.Request) {
@@ -153,9 +175,9 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	for _, g := range s.groups {
 		replicas += len(g.Replicas)
 	}
-	shards := len(s.groups)
 	s.mu.RUnlock()
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R})
+	shards := len(s.ring.Shards())
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R, "migration": s.status().State, "version": version})
 }
 
 func (s *server) auth(next http.HandlerFunc) http.Handler {
@@ -220,6 +242,22 @@ func (s *server) writeMetrics(w io.Writer) {
 	}
 	s.mu.RUnlock()
 	metrics.WriteGauge(w, "kv_replicas_alive", "Replicas of a shard that sent a heartbeat in the last 6 s.", samples)
+
+	var ringSamples []metrics.Sample
+	for _, sh := range s.ring.Shards() {
+		ringSamples = append(ringSamples, metrics.Sample{Labels: []string{"shard", sh.ID}, Value: 1})
+	}
+	metrics.WriteGauge(w, "kv_ring_shards", "Shards on the ring (1 per shard).", ringSamples)
+	st := s.status()
+	moving := 0.0
+	if st.State != "idle" {
+		moving = 1
+	}
+	metrics.WriteGauge(w, "kv_migration_in_progress", "1 while a shard is being added or drained.", []metrics.Sample{{Value: moving}})
+	metrics.WriteGauge(w, "kv_migration_keys", "Keys to move and keys moved in the current shard move.", []metrics.Sample{
+		{Labels: []string{"kind", "total"}, Value: float64(st.Total)},
+		{Labels: []string{"kind", "copied"}, Value: float64(st.Copied)},
+	})
 }
 
 func (s *server) createTable(w http.ResponseWriter, r *http.Request) {
@@ -335,19 +373,19 @@ func (s *server) item(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "waiting for shards: "+strings.Join(missing, ", "), http.StatusServiceUnavailable)
 		return
 	}
-	shard, ok := s.ring.Get(ring.Key(table, key))
+	owner, old, ok := s.owners(ring.Key(table, key))
 	if !ok {
 		s.localItem(w, r, table, key)
 		return
 	}
-	g := s.group(shard.ID)
+	g := s.group(owner)
 	w.Header().Set("X-Shard-Id", g.ID)
 
 	switch r.Method {
 	case http.MethodPut, http.MethodDelete:
 		s.write(w, r, g, wq)
 	case http.MethodGet, http.MethodHead:
-		s.read(w, r, g, rq)
+		s.read(w, r, g, rq, old)
 	default:
 		w.Header().Set("Allow", "PUT, GET, HEAD, DELETE")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -436,11 +474,41 @@ func itemURL(addr string, r *http.Request) string {
 	return addr + "/internal/items/" + url.PathEscape(r.PathValue("table")) + "/" + url.PathEscape(r.PathValue("key"))
 }
 
-func (s *server) read(w http.ResponseWriter, r *http.Request, g group, rq int) {
+func (s *server) read(w http.ResponseWriter, r *http.Request, g group, rq int, old string) {
+	best, ids, err := s.collect(r, g, rq)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if old != "" && best.status == http.StatusNotFound && best.version == 0 {
+		if b2, ids2, err := s.collect(r, s.group(old), rq); err == nil {
+			best, ids = b2, append(ids, ids2...)
+			w.Header().Set("X-Shard-Id", old)
+			w.Header().Set("X-Moving-From", old)
+		}
+	}
+	w.Header().Set("X-Replicas", strings.Join(ids, ","))
+	w.Header().Set("X-Version", strconv.FormatUint(best.version, 10))
+
+	if best.status != http.StatusOK {
+		if r.Method == http.MethodGet {
+			http.Error(w, "item not found", http.StatusNotFound)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		w.Write(best.body)
+	}
+}
+
+func (s *server) collect(r *http.Request, g group, rq int) (answer, []string, error) {
 	n := len(g.Replicas)
 	if n < rq {
-		http.Error(w, fmt.Sprintf("%s has %d replicas, r=%d", g.ID, n, rq), http.StatusServiceUnavailable)
-		return
+		return answer{}, nil, fmt.Errorf("%s has %d replicas, r=%d", g.ID, n, rq)
 	}
 	start := int(s.next.Add(1) % uint64(n))
 	order := append(append([]Replica(nil), g.Replicas[start:]...), g.Replicas[:start]...)
@@ -472,8 +540,7 @@ func (s *server) read(w http.ResponseWriter, r *http.Request, g group, rq int) {
 		got = append(got, a)
 	}
 	if len(got) < rq {
-		http.Error(w, fmt.Sprintf("only %d of %d replicas answered", len(got), rq), http.StatusServiceUnavailable)
-		return
+		return answer{}, nil, fmt.Errorf("only %d of %d replicas answered", len(got), rq)
 	}
 
 	best := got[0]
@@ -484,22 +551,7 @@ func (s *server) read(w http.ResponseWriter, r *http.Request, g group, rq int) {
 			best = a
 		}
 	}
-	w.Header().Set("X-Replicas", strings.Join(ids, ","))
-	w.Header().Set("X-Version", strconv.FormatUint(best.version, 10))
-
-	if best.status != http.StatusOK {
-		if r.Method == http.MethodGet {
-			http.Error(w, "item not found", http.StatusNotFound)
-		} else {
-			w.WriteHeader(http.StatusNotFound)
-		}
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if r.Method == http.MethodGet {
-		w.Write(best.body)
-	}
+	return best, ids, nil
 }
 
 func (s *server) localItem(w http.ResponseWriter, r *http.Request, table, key string) {
@@ -567,6 +619,14 @@ func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 	rep.seen = time.Now()
 
 	s.mu.Lock()
+	if s.removed[rep.ID] {
+		if rep.Offset > 0 {
+			s.mu.Unlock()
+			http.Error(w, rep.ID+" was removed; only new replicas with an empty log can join as "+rep.ID, http.StatusGone)
+			return
+		}
+		delete(s.removed, rep.ID)
+	}
 	g := s.groups[rep.ID]
 	if g == nil {
 		g = &group{ID: rep.ID}
@@ -585,7 +645,7 @@ func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	s.ring.Add(ring.Shard{ID: rep.ID, Addr: rep.Addr})
+	s.join(rep.ID)
 	writeJSON(w, http.StatusOK, rep)
 }
 

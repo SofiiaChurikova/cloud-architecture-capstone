@@ -193,7 +193,7 @@ func TestProtocolOverStdio(t *testing.T) {
 
 func TestSchemasAreValid(t *testing.T) {
 	s := newTestServer(t, "http://127.0.0.1:1", "")
-	b, _ := json.Marshal(s.tools)
+	b, _ := json.Marshal(s.Tools)
 	var tools []map[string]any
 	json.Unmarshal(b, &tools)
 	for _, tl := range tools {
@@ -258,7 +258,7 @@ func TestNotConfirmedWrite(t *testing.T) {
 
 func TestAnnotations(t *testing.T) {
 	s := newTestServer(t, "http://127.0.0.1:1", "")
-	for _, tl := range s.tools {
+	for _, tl := range s.Tools {
 		ro := tl.Annotations["readOnlyHint"] == true
 		destructive := tl.Annotations["destructiveHint"] == true
 		switch tl.Name {
