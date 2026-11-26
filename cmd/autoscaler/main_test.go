@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-var cfg = config{up: 0.06, down: 0.02, upFor: 2 * time.Minute, downFor: 5 * time.Minute, cooldown: 5 * time.Minute, minTraffic: 1}
+var cfg = config{up: 0.06, down: 0.02, upFor: 2 * time.Minute, downFor: 5 * time.Minute, cooldown: 5 * time.Minute, minTraffic: 1, downRate: 100}
 
 func TestScaleUpOnlyAfterUpFor(t *testing.T) {
 	d := &decider{cfg: cfg}
@@ -93,6 +93,10 @@ func TestScaleDownDrainsFirst(t *testing.T) {
 	var calls []string
 	polls := 0
 	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("query") == upQuery {
+			w.Write([]byte(`{"status":"success","data":{"result":[{"value":[0,"1"]}]}}`))
+			return
+		}
 		w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
 	}))
 	defer prom.Close()
@@ -159,5 +163,41 @@ func TestStackUpdateCommand(t *testing.T) {
 	}
 	if strings.Contains(got, "ShardCount,UsePreviousValue") {
 		t.Fatalf("ShardCount kept its old value: %s", got)
+	}
+}
+
+func TestNoDataIsNotIdle(t *testing.T) {
+	d := &decider{cfg: cfg}
+	t0 := time.Unix(0, 0)
+	for _, o := range []observation{
+		{p99: math.NaN(), traffic: 0, noData: true, shards: 2},
+		{p99: math.NaN(), traffic: 200, shards: 2},
+	} {
+		for m := 0; m <= 10; m++ {
+			if a, _ := d.step(t0.Add(time.Duration(m)*time.Minute), o); a != "" {
+				t.Fatalf("%+v: action %q, want none", o, a)
+			}
+		}
+	}
+}
+
+func TestErrorsScaleUp(t *testing.T) {
+	d := &decider{cfg: cfg}
+	t0 := time.Unix(0, 0)
+	o := observation{p99: 0.01, traffic: 100, errors: 5, shards: 1}
+	d.step(t0, o)
+	if a, _ := d.step(t0.Add(2*time.Minute), o); a != "up" {
+		t.Fatalf("5%% errors for 2 min: %q, want up", a)
+	}
+}
+
+func TestBusyStoreDoesNotScaleDown(t *testing.T) {
+	d := &decider{cfg: cfg}
+	t0 := time.Unix(0, 0)
+	o := observation{p99: 0.01, traffic: 300, shards: 2}
+	for m := 0; m <= 10; m++ {
+		if a, _ := d.step(t0.Add(time.Duration(m)*time.Minute), o); a != "" {
+			t.Fatalf("fast but busy: %q, want none", a)
+		}
 	}
 }

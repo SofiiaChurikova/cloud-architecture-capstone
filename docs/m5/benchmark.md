@@ -1,6 +1,6 @@
 # M5 benchmark - YCSB with autoscaling
 
-Same workload as M2 / M3 (`bench/workload-a.properties`: 50% read / 50% update, zipfian, 10 000 records), from CloudShell in us-east-1. The autoscaler runs on my laptop (`cmd/autoscaler`) with the default rules: up when write p99 > 60 ms for 2 min, down when < 20 ms or no traffic for 5 min, 5 min cooldown (ADR-0020).
+Same workload as M2 / M3 (`bench/workload-a.properties`: 50% read / 50% update, zipfian, 10 000 records), from CloudShell in us-east-1. The autoscaler runs on my laptop (`cmd/autoscaler`) with the default rules: up when write p99 > 60 ms for 2 min, down when < 20 ms and under 100 writes/s (or no traffic) for 5 min, 5 min cooldown, no action without data (ADR-0020).
 
 ## How I run it
 
@@ -31,6 +31,14 @@ KV_TOKEN=$TOKEN ./bin/autoscaler --prometheus http://<monitoring-ip>:9090 --coor
 ```
 
 Latency, throughput and active nodes over time are on the Grafana dashboard (panels "Write latency", "Throughput", "Scaling: shards on the ring and active nodes", "Scaling: shard move").
+
+What to write down during the runs (from the AI review):
+- from the slow-growth run: at what write rate one shard reaches p99 = 60 ms - this checks the 100 writes/s scale-down limit;
+- the real time from "decided up" to "move done" (autoscaler log + coordinator log);
+- errors during each move;
+- each pattern runs once (3-hour session), so the numbers are from one run.
+
+What the results can't show: that a short spike is handled (a new shard needs minutes), more than 2 shards, a failure in the middle of a move. Volumes are gp2 (the only type the sandbox allows), so a long fsync-heavy run can also slow down when the gp2 burst credits run out - I watch for that in the long run.
 
 ## Results
 

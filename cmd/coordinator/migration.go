@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -79,7 +80,15 @@ func (s *server) join(id string) {
 		s.mu.Unlock()
 		return
 	}
+	if len(s.ring.Shards()) > 0 && s.aliveCount(g) < N {
+		s.mu.Unlock()
+		return
+	}
 	if len(s.ring.Shards()) == 0 {
+		if len(s.expected) > 0 && !slices.Contains(s.expected, id) {
+			s.mu.Unlock()
+			return
+		}
 		s.ring.Add(ring.Shard{ID: id, Addr: leader.Addr})
 		s.mu.Unlock()
 		log.Printf("%s is on the ring", id)
@@ -89,6 +98,16 @@ func (s *server) join(id string) {
 	if err := s.startMigration("adding", id); err == nil {
 		log.Printf("%s joined, moving its keys to it", id)
 	}
+}
+
+func (s *server) aliveCount(g *group) int {
+	n := 0
+	for _, r := range g.Replicas {
+		if s.alive(r) {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *server) onRing(id string) bool {
@@ -111,7 +130,12 @@ func (s *server) startMigration(kind, id string) error {
 	var from, to []string
 	switch kind {
 	case "adding":
-		leader, _ := s.groups[id].leader()
+		g := s.groups[id]
+		if g == nil {
+			s.mu.Unlock()
+			return fmt.Errorf("%s is not registered", id)
+		}
+		leader, _ := g.leader()
 		next = append(append(next, cur...), ring.Shard{ID: id, Addr: leader.Addr})
 		for _, sh := range cur {
 			from = append(from, sh.ID)
@@ -143,6 +167,7 @@ func (s *server) migrate(m *migration) {
 		s.retry(func() error { return s.call(src, http.MethodGet, "/internal/version", nil, &v) })
 		floor = max(floor, v.Version)
 	}
+	floor += uint64(s.grace.Microseconds())
 	for _, dst := range m.to {
 		s.retry(func() error {
 			return s.call(dst, http.MethodPost, "/internal/floor", map[string]uint64{"version": floor}, nil)
@@ -175,11 +200,7 @@ func (s *server) migrate(m *migration) {
 			}
 		}
 		if m.Kind == "adding" {
-			for _, batch := range batches(moved) {
-				s.retry(func() error {
-					return s.call(src, http.MethodPost, fmt.Sprintf("/internal/purge?w=%d", s.W), batch, nil)
-				})
-			}
+			s.purge(src, m, moved)
 		}
 		log.Printf("moved %d keys from %s", len(moved), src)
 	}
@@ -198,6 +219,27 @@ func (s *server) migrate(m *migration) {
 	s.lastMove = &migrationStatus{State: m.Kind, Shard: m.Shard, Copied: m.copied.Load(), Total: m.total.Load()}
 	s.mu.Unlock()
 	log.Printf("%s %s: done, %d keys moved", m.Kind, m.Shard, m.copied.Load())
+}
+
+func (s *server) purge(src string, m *migration, moved []replica.Item) {
+	for round := 0; len(moved) > 0 && round < 5; round++ {
+		for _, batch := range batches(moved) {
+			s.retry(func() error {
+				return s.call(src, http.MethodPost, fmt.Sprintf("/internal/purge?w=%d", s.W), batch, nil)
+			})
+		}
+		var items []replica.Item
+		s.retry(func() error { return s.call(src, http.MethodGet, "/internal/dump", nil, &items) })
+		moved = moved[:0]
+		for _, it := range items {
+			if owner, ok := m.next.Get(ring.Key(it.Table, it.Key)); ok && owner.ID != src {
+				moved = append(moved, it)
+			}
+		}
+		if len(moved) > 0 {
+			log.Printf("%d late writes on %s for moved keys, dropping them", len(moved), src)
+		}
+	}
 }
 
 func batches(items []replica.Item) [][]replica.Item {

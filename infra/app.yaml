@@ -160,6 +160,7 @@ Resources:
           Environment=W=${WriteQuorum}
           Environment=R=${ReadQuorum}
           Environment=EXPECTED_SHARDS=shard-1
+          Environment=ALLOWED_SHARDS=shard-1,shard-2
           Environment=DATA_DIR=/var/lib/kvcoord
           Environment=API_TOKEN=${ApiToken}
           ExecStart=/usr/local/bin/coordinator

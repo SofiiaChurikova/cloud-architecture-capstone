@@ -219,8 +219,7 @@ func (n *Node) writeEntries(w http.ResponseWriter, r *http.Request, items []Item
 	if v, err := strconv.Atoi(r.URL.Query().Get("w")); err == nil && v > 1 {
 		need = v
 	}
-	written := 0
-	var last uint64
+	var todo []wal.Entry
 	for _, it := range items {
 		old, ok := n.store.Get(it.Table, it.Key)
 		if purge {
@@ -234,20 +233,20 @@ func (n *Node) writeEntries(w http.ResponseWriter, r *http.Request, items []Item
 		if !purge {
 			e.Value, e.Deleted = it.Value, it.Deleted
 		}
-		e, err := n.cfg.Log.Import(e)
-		if err != nil {
-			http.Error(w, "log write failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		n.apply(e)
-		last = e.Offset
-		written++
+		todo = append(todo, e)
 	}
-	if written > 0 {
-		if got := n.waitAcks(r.Context(), last, need); got < need {
-			http.Error(w, fmt.Sprintf("only %d of %d replicas confirmed", got, need), http.StatusServiceUnavailable)
-			return
-		}
+	done, err := n.cfg.Log.Import(todo)
+	if err != nil {
+		http.Error(w, "log write failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, e := range done {
+		n.apply(e)
+	}
+	written := len(done)
+	if got := n.waitAcks(r.Context(), n.cfg.Log.Last(), need); got < need {
+		http.Error(w, fmt.Sprintf("only %d of %d replicas confirmed", got, need), http.StatusServiceUnavailable)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"written": written})

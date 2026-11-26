@@ -126,7 +126,7 @@ paths:
         "404":
           description: Table or item not found
         "503":
-          description: The shards are not registered yet, or fewer than R replicas answered
+          description: The shards are not registered yet, fewer than R replicas answered, or the key is moving and the old shard did not answer
         "401":
           $ref: "#/components/responses/Unauthorized"
     head:
@@ -139,7 +139,7 @@ paths:
         "404":
           description: Table or item not found
         "503":
-          description: The shards are not registered yet, or fewer than R replicas answered
+          description: The shards are not registered yet, fewer than R replicas answered, or the key is moving and the old shard did not answer
     delete:
       summary: DELETE - delete an item
       parameters:
@@ -250,9 +250,13 @@ paths:
               $ref: "#/components/schemas/Replica"
       responses:
         "200":
-          description: Replica added, its shard is on the ring
+          description: Replica registered. A new shard goes on the ring when all 3 of its replicas are alive
         "400":
           description: Body is not valid (ids must match ^[a-z0-9-]{1,32}$, addr must be http://host:port)
+        "403":
+          description: The shard ID is not in ALLOWED_SHARDS
+        "410":
+          description: The shard was drained; its old replicas can't come back
     get:
       summary: List shards and their replicas (internal port 9080 only)
       responses:
@@ -272,6 +276,17 @@ paths:
       responses:
         "200":
           description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  shards: {type: integer}
+                  replicas: {type: integer}
+                  migration: {type: string, description: "idle, adding or draining"}
+                  move: {$ref: "#/components/schemas/Migration"}
+                  version: {type: string}
 
 components:
   headers:

@@ -7,7 +7,7 @@ The number of shards follows the load, by tail latency.
 ## ADDED Requirements
 
 ### Requirement: Scale on write p99
-The autoscaler SHALL read the write p99 of the coordinator from Prometheus every 15 s. It SHALL add a shard when p99 is above 60 ms for 2 minutes, and remove one when p99 is below 20 ms (or there is no traffic) for 5 minutes. After any action it SHALL wait 5 minutes before the next one. It SHALL NOT scale on CPU.
+The autoscaler SHALL read the write p99 of the coordinator from Prometheus every 15 s. It SHALL add a shard when p99 is above 60 ms (or more than 1% of writes fail) for 2 minutes, and remove one when p99 is below 20 ms and the write rate is below 100 writes/s (or there is no traffic) for 5 minutes. When Prometheus has no data for the coordinator, or there is traffic but no p99, it SHALL do nothing. After any action it SHALL wait 5 minutes before the next one. It SHALL NOT scale on CPU.
 
 #### Scenario: Load grows
 - **WHEN** the store has 1 shard and write p99 stays above 60 ms for 2 minutes

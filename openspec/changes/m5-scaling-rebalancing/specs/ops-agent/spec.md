@@ -7,7 +7,7 @@ An AI agent reads the alerts and metrics and suggests what to do, with reasons. 
 ## ADDED Requirements
 
 ### Requirement: Read-only tools
-`cmd/opsmcp` SHALL be an MCP server over stdio with `get_alerts`, `query_metric` and `get_cluster`. All of them SHALL only read (Prometheus API, coordinator `/health`, `/admin/migration`). There SHALL be no tool that changes anything.
+`cmd/opsmcp` SHALL be an MCP server over stdio with `get_alerts`, `query_metric` and `get_cluster`. All of them SHALL only read (Prometheus API, coordinator `/health`) and need no API token. There SHALL be no tool that changes anything.
 
 #### Scenario: Agent looks at the cluster
 - **WHEN** the agent calls `get_alerts` while a replica is down

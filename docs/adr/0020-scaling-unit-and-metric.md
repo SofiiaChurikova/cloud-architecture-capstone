@@ -28,8 +28,10 @@ What limits me:
 - Scaling unit: a whole shard. `ShardCount` in the app stack is 1 or 2; 2 is the normal state (M2 asks for at least 2), under no load it goes to 1.
 - `cmd/autoscaler` on my laptop, every 15 s:
   - metric: write p99 on the coordinator, `histogram_quantile(0.99, ...{op=~"write|delete"}[1m])`, only answers that are not `5xx` (ADR-0016);
-  - **scale up** when p99 > **60 ms** for **2 minutes** - 60% of the 100 ms write SLO, so it reacts before the SLO is broken, and a new shard needs ~3 minutes (stack update + boot + move);
-  - **scale down** when p99 < **20 ms** or there is no traffic for **5 minutes** - low enough that one shard can take it; the longer window avoids flapping;
+  - **scale up** when p99 > **60 ms** (or more than 1% of writes fail) for **2 minutes** - 60% of the 100 ms write SLO, so it reacts before the SLO is broken, and a new shard needs ~4-6 minutes (2 min of high p99 + stack update + boot + move). Failed writes are not in the histogram, so without the error rule an overloaded store would look fast;
+  - **scale down** when p99 < **20 ms** and there are less than **100 writes/s** (or no traffic) for **5 minutes** - p99 on 2 shards doesn't say what it will be on 1, so the write rate has to be low too, or it would flap. 100 writes/s is a first guess, half of what one shard takes at 60 ms; I check it with the slow-growth YCSB run;
+  - **no data = no action**: if the coordinator is not `up` in Prometheus, or there is traffic but no p99, both timers reset. Otherwise a broken scrape would look like an idle store and drain shard-2 under load;
+  - the histogram has buckets at exactly 20 and 60 ms, so the thresholds are not an interpolation between 50 and 100 ms;
   - **cooldown 5 minutes** after any action, because the move itself makes p99 jump.
 - Scale up: `aws cloudformation update-stack ... ShardCount=2`, the new replicas register on their own and the coordinator starts the move (ADR-0021).
 - Scale down: drain shard-2 through the coordinator, wait until the move is done, then `ShardCount=1`. Instances are deleted only after their data is somewhere else.
@@ -38,7 +40,8 @@ What limits me:
 - (+) No change in how a replica works; instances are only created and deleted from the template.
 - (+) Scaling down never deletes data that wasn't moved.
 - (-) Big steps (3 instances) and at most 2 shards. More shards need several replicas per instance (option 2).
-- (-) Scale up takes ~3 minutes, so a short spike is over before the new shard helps.
+- (-) Scale up takes ~4-6 minutes, so a short spike is over before the new shard helps. The spike run in the benchmark shows this, I don't hide it.
+- (-) With 1 shard at idle the store is below the M2 "at least 2 shards"; that is on purpose, 2 is the normal state.
 - (-) The autoscaler works only while it runs on my laptop. In a real setup it would run in the cluster with an IAM role.
 - (-) The thresholds come from one benchmark on t3.micro; they will be checked in the final YCSB.
 

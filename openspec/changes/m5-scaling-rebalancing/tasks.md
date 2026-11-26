@@ -27,5 +27,5 @@
 ## 4. Defense
 
 - [x] 4.1 Budget for M5
-- [ ] 4.2 AI design review
+- [x] 4.2 AI design review
 - [x] 4.3 README

@@ -23,12 +23,22 @@ Option 3. The coordinator runs one move at a time:
 
 A drained shard can't come back from its old replicas' heartbeats; a shard with the same ID is accepted again only when its leader has an empty log (new instances).
 
+Changed after the AI review (`docs/m5/ai-review.md`):
+- **No fence before the switch.** Writes that started before the switch can still land on the old owner. Two things make this safe without stopping writes: the grace sleep before the dump (10 s) is twice the coordinator's request timeout to a shard (5 s), so every write the client got `200` for is done before the dump; and the floor sent to the new owner is the old owner's greatest version **plus the grace time**, so a new write on the new owner wins over anything the old owner wrote in that window, even with a few seconds of clock skew.
+- **Late writes on the old owner are dropped.** After the purge the coordinator takes the dump again; any moved key still there was written by a request that already timed out (the client got an error), so it is purged too.
+- **A shard joins only when all 3 of its replicas are alive**, not just the leader, otherwise W=2 writes fail during the move.
+- **Only `ALLOWED_SHARDS` (shard-1, shard-2) can register**, and when the ring is empty only a shard from `EXPECTED_SHARDS` becomes the first one.
+- **Import and purge** are one log write (one fsync) per batch, and a retried batch still waits for W acks, so `200` always means W replicas have it.
+- **A failed read on the old owner** during the move is `503`, not `404`.
+
 ## Consequences
 - (+) Writes and reads keep working during the move.
 - (+) Only keys that changed owner are copied (consistent hashing: about 1/N of the keys).
 - (+) Uses what is already there: versions, last write wins, the log.
 - (-) During the move a read of a not-yet-copied key costs two round trips.
-- (-) The move state is only in the coordinator's memory. If the coordinator restarts in the middle, the move has to be started again by hand.
+- (-) The move state is only in the coordinator's memory. If the coordinator restarts in the middle, the move has to be started again by hand. Changing `ShardCount` changes only the `Shard2*` resources, so a scale up or down doesn't restart the coordinator.
+- (-) Correctness depends on the coordinator timeout being shorter than the grace sleep. If one of them is changed, the other has to be changed too.
+- (-) Retries never give up: if the leader of a shard dies in the middle (there is no failover, ADR-0011), the move waits until it is back.
 - (-) With 10 000 keys the dump is a few MB in one answer. For much more data it would need paging.
 
 **Where it lives:** `cmd/coordinator` (migration), `internal/replica` (dump, import, purge, floor), `internal/wal`, `internal/store`, `internal/ring`

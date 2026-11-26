@@ -46,13 +46,7 @@ func fakeCluster(t *testing.T) (*httptest.Server, *httptest.Server) {
 	kv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			w.Write([]byte(`{"status":"ok","shards":1,"replicas":3,"migration":"idle"}`))
-		case "/admin/migration":
-			if r.Header.Get("Authorization") != "Bearer tok" {
-				http.Error(w, "missing or wrong token", http.StatusUnauthorized)
-				return
-			}
-			w.Write([]byte(`{"state":"idle"}`))
+			w.Write([]byte(`{"status":"ok","shards":1,"replicas":3,"migration":"idle","move":{"state":"idle"}}`))
 		}
 	}))
 	t.Cleanup(prom.Close)
@@ -62,9 +56,9 @@ func fakeCluster(t *testing.T) (*httptest.Server, *httptest.Server) {
 
 func TestOpsTools(t *testing.T) {
 	prom, kv := fakeCluster(t)
-	s := newServer(&ops{prom: prom.URL, kv: kv.URL, token: "tok", http: &http.Client{Timeout: time.Second}})
+	s := newServer(&ops{prom: prom.URL, kv: kv.URL, http: &http.Client{Timeout: time.Second}})
 
-	if out, isErr := call(t, s, "get_alerts", `{}`); isErr || !strings.Contains(out, `"name":"NodeDown"`) || !strings.Contains(out, "shard-1-b") {
+	if out, isErr := call(t, s, "get_alerts", `{}`); isErr || !strings.Contains(out, `"name":"NodeDown"`) || !strings.Contains(out, "shard-1-b") || strings.Contains(out, "does not answer") {
 		t.Fatalf("get_alerts: %s", out)
 	}
 	if out, isErr := call(t, s, "query_metric", `{"query":"histogram_quantile(0.99, x)"}`); isErr || !strings.Contains(out, `"value":"0.072"`) {

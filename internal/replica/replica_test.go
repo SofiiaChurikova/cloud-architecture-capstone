@@ -334,3 +334,23 @@ func TestFloorAndLeaderOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestRetriedImportStillWaitsForW(t *testing.T) {
+	leader := New(Config{ID: "s2-a", Shard: "s2", Leader: true, Log: memLog()})
+	leader.AckTimeout = 100 * time.Millisecond
+	srv := start(t, leader)
+	body := `[{"table":"users","key":"a","value":{"v":1},"version":500}]`
+	for try := 1; try <= 2; try++ {
+		resp, err := http.Post(srv.URL+"/internal/import?w=2", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("try %d without followers: %d, want 503", try, resp.StatusCode)
+		}
+	}
+	if got := leader.cfg.Log.Last(); got != 1 {
+		t.Fatalf("log has %d entries, want 1 (the retry must not write again)", got)
+	}
+}

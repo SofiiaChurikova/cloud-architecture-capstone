@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,9 @@ func main() {
 	s.token = os.Getenv("API_TOKEN")
 	s.W = envInt("W", 2)
 	s.R = envInt("R", 2)
+	if v := os.Getenv("ALLOWED_SHARDS"); v != "" {
+		s.allowed = strings.Split(v, ",")
+	}
 	if v := os.Getenv("EXPECTED_SHARDS"); v != "" {
 		s.expected = strings.Split(v, ",")
 	}
@@ -87,6 +91,7 @@ func (s *server) alive(r Replica) bool {
 type server struct {
 	W, R      int
 	expected  []string
+	allowed   []string
 	deadAfter time.Duration
 	tablesAt  string
 	token     string
@@ -132,7 +137,7 @@ func newServer() *server {
 		},
 		reg:        &metrics.Registry{},
 		removed:    map[string]bool{},
-		grace:      5 * time.Second,
+		grace:      10 * time.Second,
 		retryWait:  time.Second,
 		moveClient: &http.Client{Timeout: time.Minute},
 	}
@@ -177,7 +182,8 @@ func (s *server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 	shards := len(s.ring.Shards())
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R, "migration": s.status().State, "version": version})
+	move := s.status()
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "shards": shards, "replicas": replicas, "n": N, "w": s.W, "r": s.R, "migration": move.State, "move": move, "version": version})
 }
 
 func (s *server) auth(next http.HandlerFunc) http.Handler {
@@ -481,11 +487,14 @@ func (s *server) read(w http.ResponseWriter, r *http.Request, g group, rq int, o
 		return
 	}
 	if old != "" && best.status == http.StatusNotFound && best.version == 0 {
-		if b2, ids2, err := s.collect(r, s.group(old), rq); err == nil {
-			best, ids = b2, append(ids, ids2...)
-			w.Header().Set("X-Shard-Id", old)
-			w.Header().Set("X-Moving-From", old)
+		b2, ids2, err := s.collect(r, s.group(old), rq)
+		if err != nil {
+			http.Error(w, "key is moving, old shard: "+err.Error(), http.StatusServiceUnavailable)
+			return
 		}
+		best, ids = b2, append(ids, ids2...)
+		w.Header().Set("X-Shard-Id", old)
+		w.Header().Set("X-Moving-From", old)
 	}
 	w.Header().Set("X-Replicas", strings.Join(ids, ","))
 	w.Header().Set("X-Version", strconv.FormatUint(best.version, 10))
@@ -613,6 +622,10 @@ func (s *server) registerShard(w http.ResponseWriter, r *http.Request) {
 	}
 	if rep.Role != "leader" && rep.Role != "follower" {
 		http.Error(w, "role must be leader or follower", http.StatusBadRequest)
+		return
+	}
+	if len(s.allowed) > 0 && !slices.Contains(s.allowed, rep.ID) {
+		http.Error(w, rep.ID+" is not in ALLOWED_SHARDS", http.StatusForbidden)
 		return
 	}
 	rep.Alive = true

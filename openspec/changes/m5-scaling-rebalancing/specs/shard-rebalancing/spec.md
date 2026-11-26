@@ -7,21 +7,21 @@ Shards can be added and removed while the store runs, and only the keys whose ow
 ## ADDED Requirements
 
 ### Requirement: Adding a shard
-When a new shard registers with a leader and 2 followers, the coordinator SHALL put it on the ring and start moving to it the keys that now belong to it. Only one move SHALL run at a time.
+When a new shard registers with a leader and 2 followers and all 3 are alive, the coordinator SHALL put it on the ring and start moving to it the keys that now belong to it. Only one move SHALL run at a time. Only shards from `ALLOWED_SHARDS` SHALL be able to register.
 
 #### Scenario: Second shard joins
 - **WHEN** the store has only shard-1 and shard-2 registers
 - **THEN** shard-2 is on the ring, and the keys that now map to shard-2 are copied to it in the background
 
 ### Requirement: Only moved keys are copied
-The move SHALL copy only the keys whose owner on the new ring is different from the old ring, with their versions (values and deletes). After the copy the old shard SHALL drop those keys.
+The move SHALL copy only the keys whose owner on the new ring is different from the old ring, with their versions (values and deletes). After the copy the old shard SHALL drop those keys, including late writes to them that arrived after the copy.
 
 #### Scenario: Key that stays
 - **WHEN** a key maps to shard-1 on the old and the new ring
 - **THEN** it is not copied
 
 ### Requirement: Reads and writes during the move
-During a move, writes SHALL go to the owner on the new ring. A read SHALL ask the new owner, and if the new owner has never seen the key (no value and no delete), ask the old owner. The new owner SHALL give every new write a version greater than any version on the old owner.
+During a move, writes SHALL go to the owner on the new ring. A read SHALL ask the new owner, and if the new owner has never seen the key (no value and no delete), ask the old owner. The new owner SHALL give every new write a version greater than any version on the old owner. If the old owner can't answer a fallback read, the coordinator SHALL answer `503`, not `404`.
 
 #### Scenario: Read before the key was copied
 - **WHEN** a client reads a key that has not been copied yet

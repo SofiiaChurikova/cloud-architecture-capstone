@@ -21,6 +21,9 @@ import (
 const (
 	p99Query     = `histogram_quantile(0.99, sum by (le) (rate(kv_request_duration_seconds_bucket{job="coordinator", op=~"write|delete"}[1m])))`
 	trafficQuery = `sum(rate(kv_requests_total{job="coordinator", op=~"write|delete"}[1m]))`
+	errorsQuery  = `sum(rate(kv_requests_total{job="coordinator", op=~"write|delete", status=~"5.."}[1m]))`
+	upQuery      = `up{job="coordinator"}`
+	maxErrors    = 0.01
 )
 
 type config struct {
@@ -29,11 +32,14 @@ type config struct {
 	downFor    time.Duration
 	cooldown   time.Duration
 	minTraffic float64
+	downRate   float64
 }
 
 type observation struct {
 	p99       float64
 	traffic   float64
+	errors    float64
+	noData    bool
 	shards    int
 	moving    bool
 	stackBusy bool
@@ -51,8 +57,13 @@ func (d *decider) step(now time.Time, o observation) (string, string) {
 		d.aboveSince, d.belowSince = time.Time{}, time.Time{}
 		return "", "a shard move or a stack update is running"
 	}
-	high := o.traffic >= d.cfg.minTraffic && o.p99 > d.cfg.up
-	low := o.traffic < d.cfg.minTraffic || math.IsNaN(o.p99) || o.p99 < d.cfg.down
+	if o.noData || (o.traffic >= d.cfg.minTraffic && math.IsNaN(o.p99)) {
+		d.aboveSince, d.belowSince = time.Time{}, time.Time{}
+		return "", "no data from Prometheus, doing nothing"
+	}
+	idle := o.traffic < d.cfg.minTraffic
+	high := !idle && (o.p99 > d.cfg.up || o.errors/o.traffic > maxErrors)
+	low := idle || (o.p99 < d.cfg.down && o.traffic < d.cfg.downRate)
 	d.aboveSince = since(d.aboveSince, high, now)
 	d.belowSince = since(d.belowSince, low, now)
 
@@ -62,10 +73,10 @@ func (d *decider) step(now time.Time, o observation) (string, string) {
 	switch {
 	case o.shards == 1 && high && now.Sub(d.aboveSince) >= d.cfg.upFor:
 		d.act(now)
-		return "up", fmt.Sprintf("write p99 above %.0f ms for %s", d.cfg.up*1000, d.cfg.upFor)
+		return "up", fmt.Sprintf("write p99 above %.0f ms or more than 1%% errors for %s", d.cfg.up*1000, d.cfg.upFor)
 	case o.shards >= 2 && low && now.Sub(d.belowSince) >= d.cfg.downFor:
 		d.act(now)
-		return "down", fmt.Sprintf("write p99 below %.0f ms or no traffic for %s", d.cfg.down*1000, d.cfg.downFor)
+		return "down", fmt.Sprintf("write p99 below %.0f ms and under %.0f writes/s (or no traffic) for %s", d.cfg.down*1000, d.cfg.downRate, d.cfg.downFor)
 	}
 	return "", ""
 }
@@ -115,6 +126,17 @@ func (s *scaler) tick(ctx context.Context, now time.Time) error {
 	if math.IsNaN(o.traffic) {
 		o.traffic = 0
 	}
+	if o.errors, err = s.promValue(ctx, errorsQuery); err != nil {
+		return err
+	}
+	if math.IsNaN(o.errors) {
+		o.errors = 0
+	}
+	up, err := s.promValue(ctx, upQuery)
+	if err != nil {
+		return err
+	}
+	o.noData = math.IsNaN(up) || up < 1
 	var health struct {
 		Shards    int    `json:"shards"`
 		Migration string `json:"migration"`
@@ -131,10 +153,11 @@ func (s *scaler) tick(ctx context.Context, now time.Time) error {
 
 	action, reason := s.d.step(now, o)
 	s.log.Info("tick", "p99_ms", round(o.p99*1000), "writes_per_s", round(o.traffic), "shards", o.shards,
-		"moving", o.moving, "stack_busy", o.stackBusy, "action", action, "reason", reason, "dry_run", s.dryRun)
+		"errors_per_s", round(o.errors), "no_data", o.noData, "moving", o.moving, "stack_busy", o.stackBusy, "action", action, "reason", reason, "dry_run", s.dryRun)
 	if action == "" || s.dryRun {
 		return nil
 	}
+	defer func() { s.d.lastAction = time.Now() }()
 	switch action {
 	case "up":
 		return s.cloud.setShardCount(2)
@@ -142,7 +165,9 @@ func (s *scaler) tick(ctx context.Context, now time.Time) error {
 		if err := s.post(ctx, s.kv+"/admin/shards/"+s.drainID+"/drain"); err != nil {
 			return err
 		}
-		if err := s.waitIdle(ctx); err != nil {
+		wctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		defer cancel()
+		if err := s.waitIdle(wctx); err != nil {
 			return err
 		}
 		return s.cloud.setShardCount(1)
@@ -288,13 +313,14 @@ func main() {
 	cooldown := flag.Duration("cooldown", 5*time.Minute, "wait after an action")
 	every := flag.Duration("every", 15*time.Second, "how often to check")
 	minTraffic := flag.Float64("min-traffic", 1, "writes per second below which the store counts as idle")
+	downRate := flag.Float64("down-rate", 100, "scale down only below this many writes per second (half of what one shard handles at the up threshold)")
 	dryRun := flag.Bool("dry-run", false, "only log the decisions")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	s := &scaler{
 		d: &decider{cfg: config{up: up.Seconds(), down: down.Seconds(), upFor: *upFor, downFor: *downFor,
-			cooldown: *cooldown, minTraffic: *minTraffic}},
+			cooldown: *cooldown, minTraffic: *minTraffic, downRate: *downRate}},
 		prom: strings.TrimRight(*prom, "/"), kv: strings.TrimRight(*kv, "/"), token: os.Getenv("KV_TOKEN"),
 		drainID: "shard-2", http: &http.Client{Timeout: 10 * time.Second},
 		cloud: awsCLI{stack: *stack, run: runAWS}, dryRun: *dryRun, pollWait: 5 * time.Second, log: logger,

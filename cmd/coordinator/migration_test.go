@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/SofiiaChurikova/cloud-architecture-capstone/internal/replica"
 	"io"
 	"net/http"
 	"strings"
@@ -158,4 +159,42 @@ func TestOnlyOneMoveAtATime(t *testing.T) {
 		t.Fatalf("migration state: %s", body)
 	}
 	c.waitIdle(t)
+}
+
+func TestJoinWaitsForAllReplicas(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	expect(t, do(t, "POST", c.internal.URL+"/internal/shards",
+		`{"id":"shard-2","replica":"shard-2-a","role":"leader","addr":"http://127.0.0.1:1"}`), http.StatusOK)
+	time.Sleep(50 * time.Millisecond)
+	if st := c.srv.status(); st.State != "idle" || len(c.srv.ring.Shards()) != 1 {
+		t.Fatalf("shard-2 joined with only its leader: %+v, ring %d", st, len(c.srv.ring.Shards()))
+	}
+}
+
+func TestOnlyAllowedShardsRegister(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	c.srv.allowed = []string{"shard-1", "shard-2"}
+	expect(t, do(t, "POST", c.internal.URL+"/internal/shards",
+		`{"id":"shard-3","replica":"shard-3-a","role":"leader","addr":"http://127.0.0.1:1"}`), http.StatusForbidden)
+}
+
+func TestLateWriteOnTheOldShardIsDropped(t *testing.T) {
+	c := newCluster(t, []string{"shard-1"}, true)
+	c.addShard(t, "shard-2")
+	c.waitIdle(t)
+	var key string
+	for i := 0; key == ""; i++ {
+		if k := fmt.Sprintf("k%d", i); ownerOn([]string{"shard-1", "shard-2"}, k) == "shard-2" {
+			key = k
+		}
+	}
+	expect(t, do(t, "PUT", c.urls["shard-1-a"].URL+"/internal/items/users/"+key+"?w=1", `{"v":"copied"}`), http.StatusOK)
+	copied, _ := c.nodes["shard-1-a"].Store().Get("users", key)
+	expect(t, do(t, "PUT", c.urls["shard-1-a"].URL+"/internal/items/users/"+key+"?w=1", `{"v":"late"}`), http.StatusOK)
+
+	m := &migration{next: c.srv.ring}
+	c.srv.purge("shard-1", m, []replica.Item{{Table: "users", Key: key, Version: copied.Version}})
+	if it, ok := c.nodes["shard-1-a"].Store().Get("users", key); ok {
+		t.Fatalf("a late write for a moved key stayed on shard-1: %s", it.Value)
+	}
 }

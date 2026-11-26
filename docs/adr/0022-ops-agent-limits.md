@@ -14,13 +14,15 @@ The agent reads data that comes from the cluster. Since M4 replica names are che
 
 ## Decision
 Option 1: `cmd/opsmcp`, an MCP server over stdio for Claude Desktop, with three read-only tools:
-- `get_alerts` - firing and pending alerts from Prometheus;
-- `query_metric` - one PromQL query to Prometheus (the Prometheus query API can't change anything);
-- `get_cluster` - coordinator `/health` and the move state.
+- `get_alerts` - firing and pending alerts from Prometheus: name, state, since, labels; no free text from annotations;
+- `query_metric` - one PromQL query to Prometheus (the Prometheus query API can't change anything), with a 5 s timeout;
+- `get_cluster` - coordinator `/health` with the move state. It needs no token.
 
 Plus instructions (`docs/m5/ops-agent.md`): answer with one action (scale up / scale down / rebalance / do nothing), the numbers it is based on, the risk, and what to check after.
 
-What the agent **can't** do: change `ShardCount`, drain or add shards, write or delete data, reach the AWS API. It has no credentials for any of it.
+What the agent **can't** do: change `ShardCount`, drain or add shards, write or delete data, reach the AWS API. `opsmcp` has no credentials for any of it - not even the API token.
+
+Changed after the AI review: "read-only" depends on the client too. Claude Desktop puts every MCP server it has into one chat, and my M4 `kvstore` server has `create_item` / `delete_item`. So for the ops agent I turn the `kvstore` server off in Claude Desktop (or remove it from the config) and keep only `kvstore-ops`. "Rebalance" here means: a move is stuck or the ring doesn't match `ShardCount`, and a human runs the drain again or fixes the stack.
 
 ## Consequences
 - (+) Whatever the agent reads or is told, the worst it can do is give bad advice.
