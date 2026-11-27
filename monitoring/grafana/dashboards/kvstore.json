@@ -324,7 +324,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "max by (shard) (kv_keys)",
+          "expr": "max by (shard) (kv_keys)", "instant": true, "range": false,
           "legendFormat": "{{shard}}"
         }
       ],

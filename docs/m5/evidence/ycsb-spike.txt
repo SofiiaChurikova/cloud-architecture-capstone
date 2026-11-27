@@ -1,0 +1,22 @@
+Spike run, 1 shard (shard-2 drained at 01:59:51), 2026-11-27 02:02-02:07 (UTC+2), CloudShell us-east-1.
+workload-a (50% read / 50% update, zipfian, 10 000 records). Only the final lines are kept.
+Low phase: threadcount=4, target=100, 3 min. High phase: threadcount=64, no target.
+In the high phase the shard-1 leader went down after ~50 s (its log had ~275 000 entries after the slow-growth run),
+so the autoscaler never saw 2 minutes of high p99 and there was no scale up; the run was stopped at 68 s.
+
+== low (target=100, 3 min)
+READ   - Takes(s): 180.0, Count: 8873, OPS: 49.3, Avg(us): 2070, Min(us): 1260, Max(us): 35231, 50th(us): 2014, 90th(us): 2261, 95th(us): 2443, 99th(us): 5719, 99.9th(us): 16351, 99.99th(us): 29679
+TOTAL  - Takes(s): 180.0, Count: 18000, OPS: 100.0, Avg(us): 4797, Min(us): 1260, Max(us): 62175, 50th(us): 6007, 90th(us): 8391, 95th(us): 8743, 99th(us): 13463, 99.9th(us): 35231, 99.99th(us): 51263
+UPDATE - Takes(s): 180.0, Count: 9127, OPS: 50.7, Avg(us): 7447, Min(us): 5308, Max(us): 62175, 50th(us): 6703, 90th(us): 8711, 95th(us): 9383, 99th(us): 18831, 99.9th(us): 42047, 99.99th(us): 55839
+
+== high (64 threads, stopped at 68 s)
+TOTAL  - Takes(s): 68.8, Count: 94702, OPS: 1376.8, Avg(us): 34136, Min(us): 1147, Max(us): 5021695, 50th(us): 8751, 90th(us): 132863, 95th(us): 142975, 99th(us): 166655, 99.9th(us): 537087, 99.99th(us): 4284415
+UPDATE - Takes(s): 68.7, Count: 19380, OPS: 281.9, Avg(us): 134135, Min(us): 13552, Max(us): 4448255, 50th(us): 132479, 90th(us): 155135, 95th(us): 166271, 99th(us): 341247, 99.9th(us): 1561599, 99.99th(us): 4448255
+UPDATE_ERROR - Takes(s): 25.5, Count: 55274, OPS: 2171.3, Avg(us): 17755, Min(us): 746, Max(us): 5021695, 50th(us): 3043, 90th(us): 7679, 95th(us): 12847, 99th(us): 29007, 99.9th(us): 5001215, 99.99th(us): 5001215
+
+Autoscaler (writes/s, write p99, errors/s):
+02:05:50  245 w/s  p99 248 ms   0 err/s
+02:06:08  386 w/s  p99 250 ms   0 err/s
+02:06:26  966 w/s  p99 464 ms   729 err/s   (leader going down, fast 503s)
+02:06:44  1345 w/s p99 1058 ms  1206 err/s
+02:07:19  285 w/s  no p99       285 err/s   -> "no data from Prometheus, doing nothing"

@@ -1,0 +1,29 @@
+Slow growth run 2, fresh cluster (redeployed), starts on 1 shard, 2026-11-27 01:34-01:54 (UTC+2), CloudShell us-east-1.
+workload-a (50% read / 50% update, zipfian, 10 000 records), threadcount=32, target = total ops/s, operationcount = target x seconds.
+Only the final lines of each step are kept.
+
+== target=200, 1 shard (01:34-01:36)
+READ_ERROR - Takes(s): 64.3, Count: 1, OPS: 0.0, Avg(us): 1696, Min(us): 1696, Max(us): 1696, 50th(us): 1696, 90th(us): 1696, 95th(us): 1696, 99th(us): 1696, 99.9th(us): 1696, 99.99th(us): 1696
+TOTAL  - Takes(s): 120.1, Count: 23999, OPS: 199.7, Avg(us): 5459, Min(us): 1214, Max(us): 110783, 50th(us): 5971, 90th(us): 10767, 95th(us): 12815, 99th(us): 19679, 99.9th(us): 53759, 99.99th(us): 103679
+UPDATE - Takes(s): 120.1, Count: 12012, OPS: 100.0, Avg(us): 8905, Min(us): 5568, Max(us): 110783, 50th(us): 7239, 90th(us): 12751, 95th(us): 14831, 99th(us): 28479, 99.9th(us): 59359, 99.99th(us): 110655
+
+== target=400, 1 shard (01:36-01:38)
+READ   - Takes(s): 120.1, Count: 24104, OPS: 200.7, Avg(us): 1917, Min(us): 1170, Max(us): 45663, 50th(us): 1838, 90th(us): 2095, 95th(us): 2329, 99th(us): 6643, 99.9th(us): 18495, 99.99th(us): 33055
+TOTAL  - Takes(s): 120.1, Count: 48000, OPS: 399.7, Avg(us): 5971, Min(us): 1170, Max(us): 187391, 50th(us): 5803, 90th(us): 11599, 95th(us): 13591, 99th(us): 24207, 99.9th(us): 83967, 99.99th(us): 180735
+UPDATE - Takes(s): 120.1, Count: 23896, OPS: 199.0, Avg(us): 10060, Min(us): 4700, Max(us): 187391, 50th(us): 8583, 90th(us): 13535, 95th(us): 16167, 99th(us): 43359, 99.9th(us): 122751, 99.99th(us): 183679
+
+== target=800, 1 shard (01:38-01:40), p99 > 60 ms but only ~1.5 min, no scale up yet
+READ   - Takes(s): 120.0, Count: 48024, OPS: 400.1, Avg(us): 2202, Min(us): 1151, Max(us): 119167, 50th(us): 1854, 90th(us): 2363, 95th(us): 3523, 99th(us): 12303, 99.9th(us): 43679, 99.99th(us): 96511
+TOTAL  - Takes(s): 120.0, Count: 96000, OPS: 799.8, Avg(us): 12883, Min(us): 1151, Max(us): 329727, 50th(us): 6155, 90th(us): 29023, 95th(us): 58111, 99th(us): 97023, 99.9th(us): 212863, 99.99th(us): 267775
+UPDATE - Takes(s): 120.0, Count: 47976, OPS: 399.7, Avg(us): 23576, Min(us): 4524, Max(us): 329727, 50th(us): 14159, 90th(us): 58079, 95th(us): 68735, 99th(us): 137855, 99.9th(us): 227327, 99.99th(us): 318463
+
+== target=800 for 5 min (01:45-01:50), 1 shard; autoscaler "up" at 01:49:26, shard-2 on the ring at 01:50:24
+READ   - Takes(s): 300.0, Count: 120105, OPS: 400.3, Avg(us): 2002, Min(us): 1160, Max(us): 212479, 50th(us): 1835, 90th(us): 2149, 95th(us): 2603, 99th(us): 8447, 99.9th(us): 26399, 99.99th(us): 56319
+TOTAL  - Takes(s): 300.0, Count: 240000, OPS: 799.9, Avg(us): 10430, Min(us): 1160, Max(us): 271359, 50th(us): 5911, 90th(us): 23199, 95th(us): 30591, 99th(us): 68799, 99.9th(us): 145407, 99.99th(us): 222975
+UPDATE - Takes(s): 300.0, Count: 119895, OPS: 399.6, Avg(us): 18872, Min(us): 4208, Max(us): 271359, 50th(us): 14911, 90th(us): 30511, 95th(us): 49663, 99th(us): 91199, 99.9th(us): 163327, 99.99th(us): 227199
+
+== target=800 for 2 min (01:51-01:53), 2 shards (shard-2 just created)
+READ   - Takes(s): 120.0, Count: 48128, OPS: 401.0, Avg(us): 2404, Min(us): 1170, Max(us): 74303, 50th(us): 1920, 90th(us): 2319, 95th(us): 3479, 99th(us): 17295, 99.9th(us): 40511, 99.99th(us): 60095
+TOTAL  - Takes(s): 120.0, Count: 96000, OPS: 799.8, Avg(us): 7455, Min(us): 1170, Max(us): 218495, 50th(us): 5979, 90th(us): 13111, 95th(us): 16895, 99th(us): 66943, 99.9th(us): 149759, 99.99th(us): 207871
+UPDATE - Takes(s): 120.0, Count: 47872, OPS: 398.8, Avg(us): 12532, Min(us): 5276, Max(us): 218495, 50th(us): 9063, 90th(us): 16223, 95th(us): 22991, 99th(us): 97663, 99.9th(us): 173183, 99.99th(us): 214911
+Per-shard write p99 from Prometheus during this step: shard-1 56 ms, shard-2 137 ms.

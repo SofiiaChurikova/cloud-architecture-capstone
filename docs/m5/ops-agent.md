@@ -10,7 +10,7 @@
 | `query_metric` | `GET <prometheus>/api/v1/query` - one PromQL query, 5 s timeout, up to 50 series |
 | `get_cluster` | coordinator `/health` (shards on the ring, replicas, version, move state) - no token needed |
 
-The server sends its instructions in `initialize`, so the client gets them without copy-paste. They tell the agent to:
+The server sends its instructions in `initialize` and also in the `get_cluster` description: in the AWS run Claude Desktop didn't use the `initialize` ones (`evidence/aws-demo.md`). They tell the agent to:
 1. look at the cluster, the alerts, write p99 and write traffic;
 2. answer with one action - **SCALE UP**, **SCALE DOWN**, **REBALANCE** or **DO NOTHING**, using the same rules as the autoscaler (ADR-0020);
 3. give the numbers, the risk, and what to check after;

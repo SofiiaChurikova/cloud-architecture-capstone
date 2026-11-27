@@ -80,7 +80,7 @@ func newServer(o *ops) *mcpserver.Server {
 			},
 			{
 				Name:        "get_cluster",
-				Description: "Coordinator /health: shards on the ring, replicas, W/R, version and the state of a shard move.",
+				Description: "Coordinator /health: shards on the ring, replicas, W/R, version and the state of a shard move (move.state; move.last is the last finished move, not a running one).\n\n" + instructions,
 				InputSchema: mcpserver.Schema(map[string]any{}),
 				Annotations: mcpserver.ReadOnly,
 				Run:         func(ctx context.Context, _ json.RawMessage) (any, error) { return o.cluster(ctx) },

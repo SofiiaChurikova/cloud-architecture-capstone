@@ -1,0 +1,33 @@
+Slow growth run, 1 shard (shard-1), 2026-11-27, from CloudShell us-east-1.
+workload-a (50% read / 50% update, zipfian, 10 000 records), threadcount=32, target = total ops/s.
+Only the final lines of each step are kept (the full output had 10 s progress lines).
+Step 100 was stopped by hand after 470 s (maxexecutiontime is ignored by this go-ycsb build), these are its last progress lines.
+Step 400: the shard-1 leader went down at ~95 s (its log was ~321 000 entries after the long run), the rest of the step and step 800 are errors.
+
+== target=100 (last progress lines, 470 s)
+READ   - Takes(s): 470.0, Count: 23574, OPS: 50.2, Avg(us): 2169, Min(us): 1337, Max(us): 48191, 50th(us): 1995, 90th(us): 2243, 95th(us): 2525, 99th(us): 7447, 99.9th(us): 29807, 99.99th(us): 41727
+TOTAL  - Takes(s): 470.0, Count: 47002, OPS: 100.0, Avg(us): 4996, Min(us): 1337, Max(us): 78975, 50th(us): 6183, 90th(us): 8879, 95th(us): 9495, 99th(us): 13527, 99.9th(us): 38655, 99.99th(us): 65087
+UPDATE - Takes(s): 469.9, Count: 23428, OPS: 49.9, Avg(us): 7841, Min(us): 5100, Max(us): 78975, 50th(us): 7019, 90th(us): 9375, 95th(us): 10911, 99th(us): 17231
+
+== target=200 (operationcount=24000)
+Run finished, takes 2m0.160093347s
+READ   - Takes(s): 120.1, Count: 11960, OPS: 99.6, Avg(us): 2108, Min(us): 1334, Max(us): 61823, 50th(us): 1922, 90th(us): 2187, 95th(us): 2639, 99th(us): 7847, 99.9th(us): 27167, 99.99th(us): 61343
+TOTAL  - Takes(s): 120.1, Count: 24000, OPS: 199.8, Avg(us): 5084, Min(us): 1334, Max(us): 112639, 50th(us): 6083, 90th(us): 8887, 95th(us): 10807, 99th(us): 16103, 99.9th(us): 53311, 99.99th(us): 95231
+UPDATE - Takes(s): 120.1, Count: 12040, OPS: 100.2, Avg(us): 8039, Min(us): 4908, Max(us): 112639, 50th(us): 6931, 90th(us): 10663, 95th(us): 11751, 99th(us): 21679, 99.9th(us): 60991, 99.99th(us): 109567
+
+== target=400 (operationcount=48000), before the leader went down (90 s)
+READ   - Takes(s): 90.0, Count: 17994, OPS: 200.0, Avg(us): 2204, Min(us): 1252, Max(us): 52127, 50th(us): 1878, 90th(us): 2191, 95th(us): 3343, 99th(us): 11983, 99.9th(us): 37663, 99.99th(us): 50527
+TOTAL  - Takes(s): 90.0, Count: 35994, OPS: 400.0, Avg(us): 6458, Min(us): 1252, Max(us): 204159, 50th(us): 6151, 90th(us): 10719, 95th(us): 12783, 99th(us): 42559, 99.9th(us): 167295, 99.99th(us): 194175
+UPDATE - Takes(s): 90.0, Count: 18000, OPS: 200.0, Avg(us): 10710, Min(us): 5020, Max(us): 204159, 50th(us): 8407, 90th(us): 12423, 95th(us): 15407, 99th(us): 87807, 99.9th(us): 180479, 99.99th(us): 199167
+
+== target=400, final
+Run finished, takes 2m0.077618291s
+READ   - Takes(s): 120.1, Count: 23999, OPS: 199.9, Avg(us): 3351, Min(us): 1252, Max(us): 3387391, 50th(us): 1909, 90th(us): 2853, 95th(us): 4507, 99th(us): 12855, 99.9th(us): 44255, 99.99th(us): 3354623
+READ_ERROR - Takes(s): 15.0, Count: 12, OPS: 0.8, Avg(us): 4999168, Min(us): 4997120, Max(us): 5001215, 50th(us): 5001215, 90th(us): 5001215, 95th(us): 5001215, 99th(us): 5001215, 99.9th(us): 5001215, 99.99th(us): 5001215
+TOTAL  - Takes(s): 120.1, Count: 42331, OPS: 352.6, Avg(us): 6987, Min(us): 1252, Max(us): 5001215, 50th(us): 2547, 90th(us): 10463, 95th(us): 12639, 99th(us): 51263, 99.9th(us): 190463, 99.99th(us): 3348479
+UPDATE - Takes(s): 120.1, Count: 18332, OPS: 152.7, Avg(us): 11747, Min(us): 5020, Max(us): 5001215, 50th(us): 8431, 90th(us): 12735, 95th(us): 16671, 99th(us): 105343, 99.9th(us): 247551, 99.99th(us): 368127
+UPDATE_ERROR - Takes(s): 25.0, Count: 5657, OPS: 226.2, Avg(us): 63132, Min(us): 785, Max(us): 5005311, 50th(us): 989, 90th(us): 1920, 95th(us): 2915, 99th(us): 5001215, 99.9th(us): 5001215, 99.99th(us): 5005311
+
+== target=800 (leader down for the whole step, stopped at ~60 s)
+READ   - Takes(s): 60.0, Count: 23955, OPS: 399.3, Avg(us): 2154, Min(us): 1634, Max(us): 36575, 50th(us): 1953, 90th(us): 2217, 95th(us): 2669, 99th(us): 7331, 99.9th(us): 19743, 99.99th(us): 34719
+UPDATE_ERROR - Takes(s): 60.0, Count: 24044, OPS: 400.8, Avg(us): 1025, Min(us): 794, Max(us): 19807, 50th(us): 972, 90th(us): 1110, 95th(us): 1197, 99th(us): 2479, 99.9th(us): 7247, 99.99th(us): 19679
