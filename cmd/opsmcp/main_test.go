@@ -88,3 +88,11 @@ func TestOnlyReadTools(t *testing.T) {
 		t.Fatal("initialize has no agent instructions")
 	}
 }
+
+func TestRulesAreInToolDescription(t *testing.T) {
+	for _, tl := range newServer(&ops{}).Tools {
+		if tl.Name == "get_cluster" && !strings.Contains(tl.Description, "SCALE DOWN") {
+			t.Fatal("get_cluster description has no rules")
+		}
+	}
+}

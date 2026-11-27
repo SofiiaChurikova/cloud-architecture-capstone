@@ -22,7 +22,7 @@ Plus instructions (`docs/m5/ops-agent.md`): answer with one action (scale up / s
 
 What the agent **can't** do: change `ShardCount`, drain or add shards, write or delete data, reach the AWS API. `opsmcp` has no credentials for any of it - not even the API token.
 
-Changed after the AI review: "read-only" depends on the client too. Claude Desktop puts every MCP server it has into one chat, and my M4 `kvstore` server has `create_item` / `delete_item`. So for the ops agent I turn the `kvstore` server off in Claude Desktop (or remove it from the config) and keep only `kvstore-ops`. "Rebalance" here means: a move is stuck or the ring doesn't match `ShardCount`, and a human runs the drain again or fixes the stack.
+Changed after the AI review: "read-only" depends on the client too. Claude Desktop puts every MCP server it has into one chat, and my M4 `kvstore` server has `create_item` / `delete_item`. So for the ops agent I turn the `kvstore` server off in Claude Desktop (or remove it from the config) and keep only `kvstore-ops`. "Rebalance" here means: a move is stuck or the ring doesn't match `ShardCount`, and a human runs the drain again or fixes the stack. After the AWS run: Claude Desktop didn't use the instructions from `initialize`, so they are also in the `get_cluster` description (AI review point 24).
 
 ## Consequences
 - (+) Whatever the agent reads or is told, the worst it can do is give bad advice.

@@ -20,9 +20,9 @@
 ## 3. AWS
 
 - [x] 3.1 `infra/app.yaml`: `ShardCount`; pipeline
-- [ ] 3.2 Demo: scale down to 1 shard and back to 2 with the autoscaler, keys per shard before / after
-- [ ] 3.3 Ops agent in Claude Desktop
-- [ ] 3.4 YCSB with autoscaling: slow growth, spike, long load; compare with M2
+- [x] 3.2 Demo: scale down to 1 shard and back to 2 with the autoscaler, keys per shard before / after
+- [x] 3.3 Ops agent in Claude Desktop
+- [x] 3.4 YCSB with autoscaling: slow growth, spike, long load; compare with M2
 
 ## 4. Defense
 

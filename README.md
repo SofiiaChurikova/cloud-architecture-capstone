@@ -8,7 +8,7 @@ Capstone for the Cloud Architectures course: a small DynamoDB-like key-value sto
 | M2 - Sharding | done |
 | M3 - Replication | done |
 | M4 - Monitoring, failures, MCP | done |
-| **M5 - Production** | in progress |
+| **M5 - Production** | done |
 
 ## What's where
 
@@ -70,7 +70,7 @@ KV_TOKEN=$TOKEN ./bin/autoscaler --prometheus http://<monitoring-ip>:9090 --coor
 
 It goes down to 1 shard after 5 minutes without load and back to 2 when write p99 is above 60 ms for 2 minutes (ADR-0020). `--dry-run` only logs the decisions.
 
-Ops agent in Claude Desktop: `docs/m5/ops-agent.md`. Benchmark: `docs/m5/benchmark.md`. Budget: `docs/m5/budget.md`.
+Ops agent in Claude Desktop: `docs/m5/ops-agent.md`. Benchmark: `docs/m5/benchmark.md`. Budget: `docs/m5/budget.md`. What happened in my session: `docs/m5/evidence/aws-demo.md`.
 
 ## How to run M4
 
@@ -260,10 +260,11 @@ Reports: [permissions](docs/m1/labrole.md), [quotas](docs/m1/quotas.md), [budget
 - Shards can be added and removed while the store runs. A new shard goes on the ring and the coordinator moves to it only the keys that now belong to it; during the move writes go to the new owner and reads ask the new owner first, then the old one. `POST /admin/shards/{id}/drain` does the same in the other direction (ADR-0021).
 - The new owner never gives a version below the old shard's greatest version, so a write during a move always beats the copy of the old value.
 - A removed shard can't come back from its old replicas; the same ID is accepted again only from replicas with an empty log.
-- The app stack has `ShardCount` (1 or 2); shard-2 exists only when it is 2. `cmd/autoscaler` changes it on write p99 (> 60 ms for 2 min: up; < 20 ms or no traffic for 5 min: drain + down; 5 min cooldown) (ADR-0020).
+- The app stack has `ShardCount` (1 or 2); shard-2 exists only when it is 2. `cmd/autoscaler` changes it on write p99 (> 60 ms or > 1% failed writes for 2 min: up; < 20 ms and under 100 writes/s, or no traffic, for 5 min: drain + down; no data: no action; 5 min cooldown) (ADR-0020).
 - `cmd/opsmcp`: read-only MCP server for an ops agent - alerts, PromQL, cluster state; it suggests scale up / down / rebalance and can't do anything (ADR-0022).
 - `/version` on the coordinator and replicas (git commit from the pipeline); `/health` shows shards on the ring and the move state.
 - Dashboard: shards on the ring, active nodes, shard move progress.
+- Found in the AWS run: a shard leader stops answering at ~260 000-320 000 log entries, because the M3 log is kept in memory and never compacted (`docs/m5/benchmark.md`).
 
 ## AI usage
 
